@@ -1,5 +1,14 @@
 import { saveRomToCache, getCachedRom, loadSram, saveSram, exportSaveFile, importSaveFile } from './storage.js';
 
+// ПЕРЕХВАТ SHADOW DOM DESMOND (обязательно ДО загрузки core/desmond.js!)
+const origAttachShadow = Element.prototype.attachShadow;
+Element.prototype.attachShadow = function(init) {
+    // Принудительно делаем Shadow DOM открытым, чтобы видеть внутренние canvas
+    const shadow = origAttachShadow.call(this, { ...init, mode: 'open' });
+    this.__openShadow = shadow;
+    return shadow;
+};
+
 let currentRomName = '';
 let currentRomBuffer = null;
 let isEmulatorInitialized = false;
@@ -133,13 +142,14 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
     }
 }
 
-// Выравнивание и масштабирование экранов (312x234 каждый) + подключение сенсорного ввода
 function fixDesmondLayout(player) {
     if (!player) return;
-    const root = player.shadowRoot || player;
+    const root = player.shadowRoot || player.__openShadow || player;
     const canvases = root.querySelectorAll('canvas');
 
-    canvases.forEach((canvas, index) => {
+    if (canvases.length === 0) return;
+
+    canvases.forEach((canvas) => {
         canvas.style.position = 'relative';
         canvas.style.top = 'auto';
         canvas.style.left = 'auto';
@@ -150,128 +160,122 @@ function fixDesmondLayout(player) {
         canvas.style.touchAction = 'none';
     });
 
-    // В Desmond второй canvas (индекс 1) — это нижний сенсорный экран (если canvas один сдвоенный — берем индекс 0)
+    // Нижний экран — это второй canvas (индекс 1), либо единственный (индекс 0)
     const bottomCanvas = canvases.length > 1 ? canvases[1] : canvases[0];
-    if (bottomCanvas && !bottomCanvas.dataset.touchAttached) {
-        bottomCanvas.dataset.touchAttached = 'true';
-        setupBottomScreenTouch(bottomCanvas, canvases.length === 1);
+    if (bottomCanvas && !bottomCanvas.dataset.stylusReady) {
+        bottomCanvas.dataset.stylusReady = 'true';
+        bridgeStylusEvents(bottomCanvas, canvases[0]);
     }
 }
 
-/* ==========================================
-   Сенсорный ввод (Стилус) для нижнего экрана
-   ========================================== */
+// Транслятор нажатий пальцем/мышью в родной формат, который ждёт внутри себя desmond.js
+function bridgeStylusEvents(bottomCanvas, topCanvas) {
+    let activeTouch = false;
 
-function setupBottomScreenTouch(bottomCanvas, isSingleCombinedCanvas) {
-    let isStylusDown = false;
-
-    // Перевод координат касания по экрану (312x234) в родные координаты NDS (256x192)
-    function getNdsCoordinates(e) {
+    // Вычисляем точные координаты 0..255 и 0..191 на нижнем экране
+    function calcNdsPos(e) {
         const rect = bottomCanvas.getBoundingClientRect();
-        const clientX = e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX;
-        const clientY = e.touches && e.touches[0] ? e.touches[0].clientY : e.clientY;
-
-        let relX = clientX - rect.left;
-        let relY = clientY - rect.top;
-        let height = rect.height;
-
-        // Если вдруг сборка рендерит оба экрана на одном высоком canvas, берем только нижнюю половину
-        if (isSingleCombinedCanvas) {
-            height = rect.height / 2;
-            relY = relY - height;
-        }
-
-        const x = Math.max(0, Math.min(255, Math.floor((relX / rect.width) * 256)));
-        const y = Math.max(0, Math.min(191, Math.floor((relY / height) * 192)));
-
-        return { x, y, clientX, clientY };
+        const pt = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+        const x = Math.max(0, Math.min(255, Math.floor(((pt.clientX - rect.left) / rect.width) * 256)));
+        const y = Math.max(0, Math.min(191, Math.floor(((pt.clientY - rect.top) / rect.height) * 192)));
+        return { x, y, rect };
     }
 
-    // Передача координат стилуса во все возможные интерфейсы ядра Desmond / DeSmuME-wasm
-    function sendTouchToCore(x, y, isTouching, originalEvent) {
-        // 1. Глобальные переменные, которые использует классический порт DeSmuME-wasm / Desmond
-        window.touchX = x;
-        window.touchY = y;
-        window.touched = isTouching ? 1 : 0;
+    // Подменяем getBoundingClientRect у нижнего экрана, если Desmond считает координаты через него:
+    // заставляем внутренний код Desmond думать, что ширина canvas = 256, а высота = 192!
+    const origGetRect = bottomCanvas.getBoundingClientRect.bind(bottomCanvas);
 
-        if (window.Module) {
-            window.Module.touchX = x;
-            window.Module.touchY = y;
-            window.Module.touched = isTouching ? 1 : 0;
+    function dispatchFakeTouchAndMouse(type, e, isDown) {
+        const { x, y, rect } = calcNdsPos(e);
 
-            // 2. Прямой вызов экспортированных C/WASM функций стилуса (если они открыты в сборке)
-            try {
-                if (typeof window.Module._setTouchPos === 'function') {
-                    window.Module._setTouchPos(x, y, isTouching ? 1 : 0);
-                } else if (typeof window.Module._touchScreen === 'function') {
-                    if (isTouching) {
-                        window.Module._touchScreen(x, y);
-                    } else if (typeof window.Module._releaseTouch === 'function') {
-                        window.Module._releaseTouch();
-                    }
-                } else if (typeof window.Module.ccall === 'function') {
-                    window.Module.ccall('touchScreen', 'void', ['number', 'number', 'number'], [x, y, isTouching ? 1 : 0]);
-                }
-            } catch (err) {
-                // Игнорируем, если конкретная C-функция называется иначе
-            }
-        }
+        // Внутри некоторых сборок Desmond координаты мыши/тача читаются относительно (0,0) окна
+        // или со смещением y + 192 (под верхним экраном).
+        // Генерируем и TouchEvent, и MouseEvent с точными координатами:
+        const mouseType = type === 'start' ? 'mousedown' : (type === 'move' ? 'mousemove' : 'mouseup');
+        const touchType = type === 'start' ? 'touchstart' : (type === 'move' ? 'touchmove' : 'touchend');
 
-        // 3. Синтетические события мыши для встроенного слушателя внутри Shadow DOM Desmond.
-        // Важно: если событие уже мышиное, не зацикливаем его (проверяем флагом _isSynthetic)
-        if (originalEvent && !originalEvent._isSynthetic) {
-            const mouseType = isTouching
-                ? (originalEvent.type.includes('down') || originalEvent.type.includes('start') ? 'mousedown' : 'mousemove')
-                : 'mouseup';
+        // Временно возвращаем масштаб 256x192 при запросе getBoundingClientRect внутри обработчика Desmond
+        bottomCanvas.getBoundingClientRect = () => ({
+            left: 0, top: 0, right: 256, bottom: 192, width: 256, height: 192, x: 0, y: 0
+        });
 
-            const synthMouse = new MouseEvent(mouseType, {
+        try {
+            const mEv = new MouseEvent(mouseType, {
                 bubbles: true,
                 cancelable: true,
-                view: window,
-                clientX: originalEvent.clientX,
-                clientY: originalEvent.clientY,
+                clientX: x,
+                clientY: y,
                 screenX: x,
                 screenY: y,
                 button: 0,
-                buttons: isTouching ? 1 : 0
+                buttons: isDown ? 1 : 0
             });
+            Object.defineProperty(mEv, 'offsetX', { get: () => x });
+            Object.defineProperty(mEv, 'offsetY', { get: () => y });
+            Object.defineProperty(mEv, 'pageX', { get: () => x });
+            Object.defineProperty(mEv, 'pageY', { get: () => y });
+            mEv._fromBridge = true;
 
-            // Переопределяем offsetX / offsetY, так как Desmond часто берет координаты стилуса именно из e.offsetX / e.offsetY
-            Object.defineProperty(synthMouse, 'offsetX', { get: () => x });
-            Object.defineProperty(synthMouse, 'offsetY', { get: () => y });
-            synthMouse._isSynthetic = true;
+            bottomCanvas.dispatchEvent(mEv);
+            window.dispatchEvent(mEv);
+            document.dispatchEvent(mEv);
 
-            bottomCanvas.dispatchEvent(synthMouse);
+            // Также создаем TouchEvent, так как на мобильных устройствах Desmond часто включает ветку touchstart/touchmove
+            if (typeof Touch !== 'undefined' && typeof TouchEvent !== 'undefined') {
+                const touchObj = new Touch({
+                    identifier: 1,
+                    target: bottomCanvas,
+                    clientX: x,
+                    clientY: y,
+                    pageX: x,
+                    pageY: y,
+                    screenX: x,
+                    screenY: y
+                });
+                const tEv = new TouchEvent(touchType, {
+                    bubbles: true,
+                    cancelable: true,
+                    touches: isDown ? [touchObj] : [],
+                    targetTouches: isDown ? [touchObj] : [],
+                    changedTouches: [touchObj]
+                });
+                tEv._fromBridge = true;
+                bottomCanvas.dispatchEvent(tEv);
+                window.dispatchEvent(tEv);
+                document.dispatchEvent(tEv);
+            }
+        } finally {
+            // Возвращаем настоящий getBoundingClientRect обратно для нашей калибровки
+            bottomCanvas.getBoundingClientRect = origGetRect;
         }
     }
 
-    // Обработчики Pointer Events (работают и для пальца на смартфоне, и для мыши на ПК)
     bottomCanvas.addEventListener('pointerdown', (e) => {
-        if (e._isSynthetic) return;
+        if (e._fromBridge) return;
         e.preventDefault();
-        bottomCanvas.setPointerCapture(e.pointerId); // Фиксируем палец на экране даже при быстрых свайпах
-        isStylusDown = true;
-        const { x, y } = getNdsCoordinates(e);
-        sendTouchToCore(x, y, true, e);
-    });
+        e.stopPropagation();
+        bottomCanvas.setPointerCapture(e.pointerId);
+        activeTouch = true;
+        dispatchFakeTouchAndMouse('start', e, true);
+    }, { passive: false });
 
     bottomCanvas.addEventListener('pointermove', (e) => {
-        if (e._isSynthetic || !isStylusDown) return;
+        if (e._fromBridge || !activeTouch) return;
         e.preventDefault();
-        const { x, y } = getNdsCoordinates(e);
-        sendTouchToCore(x, y, true, e);
-    });
+        e.stopPropagation();
+        dispatchFakeTouchAndMouse('move', e, true);
+    }, { passive: false });
 
-    const endTouch = (e) => {
-        if (e._isSynthetic || !isStylusDown) return;
+    const stopTouch = (e) => {
+        if (e._fromBridge || !activeTouch) return;
         e.preventDefault();
-        isStylusDown = false;
-        const { x, y } = getNdsCoordinates(e);
-        sendTouchToCore(x, y, false, e);
+        e.stopPropagation();
+        activeTouch = false;
+        dispatchFakeTouchAndMouse('end', e, false);
     };
 
-    bottomCanvas.addEventListener('pointerup', endTouch);
-    bottomCanvas.addEventListener('pointercancel', endTouch);
+    bottomCanvas.addEventListener('pointerup', stopTouch, { passive: false });
+    bottomCanvas.addEventListener('pointercancel', stopTouch, { passive: false });
 }
 
 /* ==========================================
@@ -489,7 +493,7 @@ async function writeSaveToDesmondDB(romName, uint8Array) {
     }
 }
 
-// Кнопка «💾 Сохранить» (принудительная фиксация текущего сохранения)
+// Кнопка «Сохранить» (принудительная фиксация текущего сохранения)
 const btnQuickSave = document.getElementById('btn-quick-save');
 if (btnQuickSave) {
     btnQuickSave.addEventListener('click', async (e) => {
