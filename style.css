@@ -142,6 +142,17 @@ desmond-player canvas, canvas {
     margin-bottom: 10px;
 }
 
+.d-pad-container,
+.action-buttons-container {
+    pointer-events: none;
+}
+
+/* А самим кнопкам оставляем pointer-events: auto */
+.d-pad-container button,
+.action-buttons-container button {
+    pointer-events: auto;
+}
+
 .d-pad-middle, .action-middle {
     display: flex;
     gap: 24px;

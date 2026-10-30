@@ -133,12 +133,13 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
     }
 }
 
-// Выравнивание и масштабирование экранов (312x234 каждый) + включение тачскрина
+// Выравнивание и масштабирование экранов (312x234 каждый) + подключение сенсорного ввода
 function fixDesmondLayout(player) {
     if (!player) return;
     const root = player.shadowRoot || player;
     const canvases = root.querySelectorAll('canvas');
-    canvases.forEach((canvas) => {
+
+    canvases.forEach((canvas, index) => {
         canvas.style.position = 'relative';
         canvas.style.top = 'auto';
         canvas.style.left = 'auto';
@@ -148,6 +149,129 @@ function fixDesmondLayout(player) {
         canvas.style.pointerEvents = 'auto';
         canvas.style.touchAction = 'none';
     });
+
+    // В Desmond второй canvas (индекс 1) — это нижний сенсорный экран (если canvas один сдвоенный — берем индекс 0)
+    const bottomCanvas = canvases.length > 1 ? canvases[1] : canvases[0];
+    if (bottomCanvas && !bottomCanvas.dataset.touchAttached) {
+        bottomCanvas.dataset.touchAttached = 'true';
+        setupBottomScreenTouch(bottomCanvas, canvases.length === 1);
+    }
+}
+
+/* ==========================================
+   Сенсорный ввод (Стилус) для нижнего экрана
+   ========================================== */
+
+function setupBottomScreenTouch(bottomCanvas, isSingleCombinedCanvas) {
+    let isStylusDown = false;
+
+    // Перевод координат касания по экрану (312x234) в родные координаты NDS (256x192)
+    function getNdsCoordinates(e) {
+        const rect = bottomCanvas.getBoundingClientRect();
+        const clientX = e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches && e.touches[0] ? e.touches[0].clientY : e.clientY;
+
+        let relX = clientX - rect.left;
+        let relY = clientY - rect.top;
+        let height = rect.height;
+
+        // Если вдруг сборка рендерит оба экрана на одном высоком canvas, берем только нижнюю половину
+        if (isSingleCombinedCanvas) {
+            height = rect.height / 2;
+            relY = relY - height;
+        }
+
+        const x = Math.max(0, Math.min(255, Math.floor((relX / rect.width) * 256)));
+        const y = Math.max(0, Math.min(191, Math.floor((relY / height) * 192)));
+
+        return { x, y, clientX, clientY };
+    }
+
+    // Передача координат стилуса во все возможные интерфейсы ядра Desmond / DeSmuME-wasm
+    function sendTouchToCore(x, y, isTouching, originalEvent) {
+        // 1. Глобальные переменные, которые использует классический порт DeSmuME-wasm / Desmond
+        window.touchX = x;
+        window.touchY = y;
+        window.touched = isTouching ? 1 : 0;
+
+        if (window.Module) {
+            window.Module.touchX = x;
+            window.Module.touchY = y;
+            window.Module.touched = isTouching ? 1 : 0;
+
+            // 2. Прямой вызов экспортированных C/WASM функций стилуса (если они открыты в сборке)
+            try {
+                if (typeof window.Module._setTouchPos === 'function') {
+                    window.Module._setTouchPos(x, y, isTouching ? 1 : 0);
+                } else if (typeof window.Module._touchScreen === 'function') {
+                    if (isTouching) {
+                        window.Module._touchScreen(x, y);
+                    } else if (typeof window.Module._releaseTouch === 'function') {
+                        window.Module._releaseTouch();
+                    }
+                } else if (typeof window.Module.ccall === 'function') {
+                    window.Module.ccall('touchScreen', 'void', ['number', 'number', 'number'], [x, y, isTouching ? 1 : 0]);
+                }
+            } catch (err) {
+                // Игнорируем, если конкретная C-функция называется иначе
+            }
+        }
+
+        // 3. Синтетические события мыши для встроенного слушателя внутри Shadow DOM Desmond.
+        // Важно: если событие уже мышиное, не зацикливаем его (проверяем флагом _isSynthetic)
+        if (originalEvent && !originalEvent._isSynthetic) {
+            const mouseType = isTouching
+                ? (originalEvent.type.includes('down') || originalEvent.type.includes('start') ? 'mousedown' : 'mousemove')
+                : 'mouseup';
+
+            const synthMouse = new MouseEvent(mouseType, {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: originalEvent.clientX,
+                clientY: originalEvent.clientY,
+                screenX: x,
+                screenY: y,
+                button: 0,
+                buttons: isTouching ? 1 : 0
+            });
+
+            // Переопределяем offsetX / offsetY, так как Desmond часто берет координаты стилуса именно из e.offsetX / e.offsetY
+            Object.defineProperty(synthMouse, 'offsetX', { get: () => x });
+            Object.defineProperty(synthMouse, 'offsetY', { get: () => y });
+            synthMouse._isSynthetic = true;
+
+            bottomCanvas.dispatchEvent(synthMouse);
+        }
+    }
+
+    // Обработчики Pointer Events (работают и для пальца на смартфоне, и для мыши на ПК)
+    bottomCanvas.addEventListener('pointerdown', (e) => {
+        if (e._isSynthetic) return;
+        e.preventDefault();
+        bottomCanvas.setPointerCapture(e.pointerId); // Фиксируем палец на экране даже при быстрых свайпах
+        isStylusDown = true;
+        const { x, y } = getNdsCoordinates(e);
+        sendTouchToCore(x, y, true, e);
+    });
+
+    bottomCanvas.addEventListener('pointermove', (e) => {
+        if (e._isSynthetic || !isStylusDown) return;
+        e.preventDefault();
+        const { x, y } = getNdsCoordinates(e);
+        sendTouchToCore(x, y, true, e);
+    });
+
+    const endTouch = (e) => {
+        if (e._isSynthetic || !isStylusDown) return;
+        e.preventDefault();
+        isStylusDown = false;
+        const { x, y } = getNdsCoordinates(e);
+        sendTouchToCore(x, y, false, e);
+    };
+
+    bottomCanvas.addEventListener('pointerup', endTouch);
+    bottomCanvas.addEventListener('pointercancel', endTouch);
 }
 
 /* ==========================================
