@@ -1,10 +1,10 @@
 import { saveRomToCache, getCachedRom, loadSram, saveSram, exportSaveFile, importSaveFile } from './storage.js';
 
 let currentRomName = '';
+let currentRomBuffer = null;
 let isEmulatorInitialized = false;
 
-// 0. Оптимизация звука: перехватываем создание AudioContext внутри Desmond,
-// чтобы задать буфер 'interactive' и снизить прерывания звука
+// 0. Оптимизация звука (снижает прерывания звука)
 const OriginalAudioContext = window.AudioContext || window.webkitAudioContext;
 if (OriginalAudioContext) {
     window.AudioContext = window.webkitAudioContext = function(options = {}) {
@@ -15,14 +15,48 @@ if (OriginalAudioContext) {
     };
 }
 
-// 1. Регистрация Service Worker[cite: 2, 5]
+// Перехватчик виртуального постоянного URL для ROM-файла.
+// Благодаря этому Desmond видит постоянное имя файла (а не случайный blob: URL)
+// и корректно сохраняет/загружает прогресс между сессиями!
+const originalFetch = window.fetch;
+window.fetch = async function(input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    if (url.includes('__virtual_rom__/') && currentRomBuffer) {
+        return new Response(currentRomBuffer.slice(0), {
+            status: 200,
+            headers: { 'Content-Type': 'application/octet-stream' }
+        });
+    }
+    return originalFetch.apply(this, arguments);
+};
+
+// Перехват XMLHttpRequest (на случай если сборка Desmond грузит ROM через XHR)
+const OriginalXHR = window.XMLHttpRequest;
+window.XMLHttpRequest = function() {
+    const xhr = new OriginalXHR();
+    const origOpen = xhr.open;
+    let isVirtualRom = false;
+
+    xhr.open = function(method, url) {
+        if (typeof url === 'string' && url.includes('__virtual_rom__/') && currentRomBuffer) {
+            isVirtualRom = true;
+            const blob = new Blob([currentRomBuffer], { type: 'application/octet-stream' });
+            const blobUrl = URL.createObjectURL(blob);
+            return origOpen.call(this, method, blobUrl);
+        }
+        return origOpen.apply(this, arguments);
+    };
+    return xhr;
+};
+
+// 1. Регистрация Service Worker
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js').catch(err => console.error(err));
     });
 }
 
-// 2. Проверка кэшированной игры при запуске[cite: 2, 3]
+// 2. Активация кнопки «Продолжить» при старте
 document.addEventListener('DOMContentLoaded', async () => {
     try {
         const cachedRom = await getCachedRom();
@@ -38,7 +72,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 });
 
-// 3. Загрузка нового ROM через input[cite: 2, 3]
+// 3. Загрузка нового ROM
 document.getElementById('rom-input').addEventListener('change', async (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -46,16 +80,18 @@ document.getElementById('rom-input').addEventListener('change', async (event) =>
     try {
         const arrayBuffer = await file.arrayBuffer();
         await saveRomToCache(file.name, arrayBuffer);
+        document.getElementById('btn-continue').disabled = false;
         loadEmulatorAndRun(file.name, arrayBuffer);
-        event.target.value = ''; // Сброс инпута, чтобы работал повторный выбор
+        event.target.value = '';
     } catch (error) {
         console.error('Ошибка чтения ROM файла:', error);
     }
 });
 
-// 4. Подключение desmond.js, выравнивание экранов и запуск
+// 4. Запуск эмулятора
 async function loadEmulatorAndRun(romName, arrayBuffer) {
     currentRomName = romName;
+    currentRomBuffer = arrayBuffer;
 
     if (window.__desmondAudioCtx && window.__desmondAudioCtx.state === 'suspended') {
         window.__desmondAudioCtx.resume();
@@ -72,23 +108,22 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
         isEmulatorInitialized = true;
     }
 
-    // Восстанавливаем сохранение перед стартом игры
-    const sramData = await loadSram(romName);
-    if (sramData) {
-        injectSaveToEmulator(romName, sramData);
+    // Если в нашей БД (storage.js) есть сохранение, записываем его во внутреннюю БД Desmond перед запуском
+    const savedSram = await loadSram(romName);
+    if (savedSram) {
+        await writeSaveToDesmondDB(romName, savedSram);
     }
 
-    const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
-    const romUrl = URL.createObjectURL(blob);
+    // Используем постоянный виртуальный путь с именем игры вместо случайного Blob URL
+    const virtualRomUrl = `./__virtual_rom__/${encodeURIComponent(romName)}`;
     const player = document.getElementById('player');
 
     const startPlayer = () => {
-        player.loadURL(romUrl, () => {
-            fixDesmondShadowDOM(player);
-            if (sramData) injectSaveToEmulator(romName, sramData);
+        player.loadURL(virtualRomUrl, () => {
+            fixDesmondLayout(player);
         });
-        // На случай если версия desmond.js не вызывает callback в loadURL:
-        setTimeout(() => fixDesmondShadowDOM(player), 500);
+        setTimeout(() => fixDesmondLayout(player), 400);
+        setTimeout(() => fixDesmondLayout(player), 1200);
     };
 
     if (player && typeof player.loadURL === 'function') {
@@ -98,9 +133,8 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
     }
 }
 
-// Снимает жесткую привязку к левому верхнему углу внутри Shadow DOM плеера
-// и активирует тачскрин на нижнем экране
-function fixDesmondShadowDOM(player) {
+// Выравнивание и масштабирование экранов (312x234 каждый) + включение тачскрина
+function fixDesmondLayout(player) {
     if (!player) return;
     const root = player.shadowRoot || player;
     const canvases = root.querySelectorAll('canvas');
@@ -108,8 +142,8 @@ function fixDesmondShadowDOM(player) {
         canvas.style.position = 'relative';
         canvas.style.top = 'auto';
         canvas.style.left = 'auto';
-        canvas.style.width = '256px';
-        canvas.style.height = '192px';
+        canvas.style.width = '312px';
+        canvas.style.height = '234px';
         canvas.style.display = 'block';
         canvas.style.pointerEvents = 'auto';
         canvas.style.touchAction = 'none';
@@ -140,10 +174,6 @@ function triggerDesmondKey(btnKey, isPressed) {
     if (!map) return;
 
     const eventType = isPressed ? 'keydown' : 'keyup';
-
-    // В старых сборках Emscripten/Desmond свойство keyCode в конструкторе KeyboardEvent
-    // часто игнорируется и равно 0, из-за чего не работают Enter (Start) и Shift (Select).
-    // Принудительно задаем keyCode и which через Object.defineProperty:
     const createKeyEvent = (codeVal, keyName, codeName) => {
         const ev = new KeyboardEvent(eventType, {
             key: keyName,
@@ -160,7 +190,6 @@ function triggerDesmondKey(btnKey, isPressed) {
     window.dispatchEvent(ev);
     document.dispatchEvent(ev);
 
-    // Дублируем Select на Backspace (код 8), так как ряд сборок Desmond мапит Select на него
     if (btnKey === 'select') {
         const altEv = createKeyEvent(8, 'Backspace', 'Backspace');
         window.dispatchEvent(altEv);
@@ -173,7 +202,7 @@ document.querySelectorAll('button[data-key]').forEach(btn => {
 
     btn.addEventListener('pointerdown', (e) => {
         e.preventDefault();
-        btn.blur(); // Убираем фокус с кнопки, чтобы Enter (Start) не вызывал клик по ней
+        btn.blur();
         btn.classList.add('active');
         triggerDesmondKey(key, true);
     });
@@ -190,65 +219,101 @@ document.querySelectorAll('button[data-key]').forEach(btn => {
 });
 
 /* ==========================================
-   Система сохранений (.sav): Синхронизация с ядром Desmond
+   Надежное чтение и запись сохранений (.sav)
+   из всех внутренних баз Desmond (IndexedDB + FS)
    ========================================== */
 
-// Функция извлечения текущего .sav напрямую из памяти работающего эмулятора
-async function extractSaveFromEmulator(romName) {
-    const savName = romName.replace(/\.nds$/i, '.sav');
-    const dsvName = romName.replace(/\.nds$/i, '.dsv');
-
-    // 1. Проверяем виртуальную файловую систему Emscripten (Module.FS)
-    if (window.Module && window.Module.FS) {
-        const fs = window.Module.FS;
-        try {
-            // Ищем любой созданный ядром файл сохранения (.sav или .dsv) в корне '/'
-            const files = fs.readdir('/');
-            for (const f of files) {
-                if (f.endsWith('.sav') || f.endsWith('.dsv') || f === savName || f === dsvName) {
-                    const data = fs.readFile('/' + f);
-                    if (data && data.length > 0) return new Uint8Array(data);
-                }
-            }
-        } catch (e) {
-            // Игнорируем ошибки чтения
-        }
-    }
-
-    // 2. Если сборка Desmond хранит сохранения через встроенный localforage
+// Читает данные сохранения напрямую из внутренней IndexedDB (localforage) или FS ядра Desmond
+async function readSaveFromDesmondDB(romName) {
+    // 1. Проверяем window.localforage (если Desmond экспортировал его глобально)
     if (window.localforage) {
         try {
             const keys = await window.localforage.keys();
             for (const k of keys) {
-                if (k.includes('sav') || k.includes('save') || k.includes(romName)) {
-                    const data = await window.localforage.getItem(k);
-                    if (data) return new Uint8Array(data);
+                const val = await window.localforage.getItem(k);
+                if (val && (val.byteLength > 0 || val.length > 0)) {
+                    return new Uint8Array(val.buffer || val);
                 }
             }
         } catch (e) {}
     }
 
-    return null;
+    // 2. Прямое чтение из всех IndexedDB баз домена (Desmond обычно создает базу 'localforage' или '/data')
+    const possibleDbNames = ['localforage', '/data', 'desmond', 'emscripten_filesystem'];
+    for (const dbName of possibleDbNames) {
+        try {
+            const data = await new Promise((resolve) => {
+                const req = indexedDB.open(dbName);
+                req.onerror = () => resolve(null);
+                req.onsuccess = (e) => {
+                    const db = e.target.result;
+                    const storeNames = Array.from(db.objectStoreNames);
+                    if (storeNames.length === 0) {
+                        db.close();
+                        return resolve(null);
+                    }
+                    const tx = db.transaction(storeNames, 'readonly');
+                    let found = null;
+                    storeNames.forEach(sName => {
+                        const store = tx.objectStore(sName);
+                        const getAllReq = store.getAll();
+                        getAllReq.onsuccess = () => {
+                            const items = getAllReq.result || [];
+                            for (const item of items) {
+                                // Ищем бинарный массив сохранения (обычно от 512 байт до 1 МБ)
+                                const raw = (item && item.contents) ? item.contents : item;
+                                if (raw instanceof Uint8Array || raw instanceof ArrayBuffer || ArrayBuffer.isView(raw)) {
+                                    const arr = new Uint8Array(raw.buffer || raw);
+                                    if (arr.byteLength >= 128 && arr.byteLength <= 2 * 1024 * 1024) {
+                                        found = arr;
+                                    }
+                                }
+                            }
+                        };
+                    });
+                    tx.oncomplete = () => {
+                        db.close();
+                        resolve(found);
+                    };
+                    tx.onerror = () => {
+                        db.close();
+                        resolve(null);
+                    };
+                };
+            });
+            if (data) return data;
+        } catch (e) {}
+    }
+
+    // 3. Проверка Emscripten Module.FS
+    const fs = (window.Module && window.Module.FS) || window.FS;
+    if (fs) {
+        try {
+            const scanDirs = ['/', '/data', '/saves'];
+            for (const dir of scanDirs) {
+                try {
+                    const files = fs.readdir(dir);
+                    for (const f of files) {
+                        if (f.endsWith('.sav') || f.endsWith('.dsv')) {
+                            const fullPath = dir === '/' ? '/' + f : dir + '/' + f;
+                            const data = fs.readFile(fullPath);
+                            if (data && data.length > 0) return new Uint8Array(data);
+                        }
+                    }
+                } catch (e) {}
+            }
+        } catch (e) {}
+    }
+
+    // 4. Резерв: берем из нашей базы storage.js
+    return await loadSram(romName);
 }
 
-// Запись сохранения во все доступные хранилища ядра
-async function injectSaveToEmulator(romName, uint8Array) {
-    const savName = romName.replace(/\.nds$/i, '.sav');
+// Записывает импортированный .sav во все внутренние хранилища Desmond
+async function writeSaveToDesmondDB(romName, uint8Array) {
+    await saveSram(romName, uint8Array);
 
-    if (window.Module && window.Module.FS) {
-        const fs = window.Module.FS;
-        try {
-            fs.writeFile('/' + savName, uint8Array);
-            // Перезаписываем также текущий активный .sav файл, если он был назван по Blob URL
-            const files = fs.readdir('/');
-            for (const f of files) {
-                if (f.endsWith('.sav') || f.endsWith('.dsv')) {
-                    fs.writeFile('/' + f, uint8Array);
-                }
-            }
-        } catch (e) {}
-    }
-
+    // 1. Запись через localforage
     if (window.localforage) {
         try {
             const keys = await window.localforage.keys();
@@ -257,51 +322,109 @@ async function injectSaveToEmulator(romName, uint8Array) {
             }
         } catch (e) {}
     }
+
+    // 2. Прямая перезапись ключей в базе localforage через IndexedDB API
+    try {
+        await new Promise((resolve) => {
+            const req = indexedDB.open('localforage');
+            req.onerror = () => resolve();
+            req.onsuccess = (e) => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains('keyvaluepairs')) {
+                    db.close();
+                    return resolve();
+                }
+                const tx = db.transaction(['keyvaluepairs'], 'readwrite');
+                const store = tx.objectStore('keyvaluepairs');
+                const keysReq = store.getAllKeys();
+                keysReq.onsuccess = () => {
+                    const keys = keysReq.result || [];
+                    keys.forEach(k => store.put(uint8Array, k));
+                };
+                tx.oncomplete = () => {
+                    db.close();
+                    resolve();
+                };
+            };
+        });
+    } catch (e) {}
+
+    // 3. Запись в Module.FS
+    const fs = (window.Module && window.Module.FS) || window.FS;
+    if (fs) {
+        try {
+            const savName = romName.replace(/\.nds$/i, '.sav');
+            fs.writeFile('/' + savName, uint8Array);
+            const files = fs.readdir('/');
+            for (const f of files) {
+                if (f.endsWith('.sav') || f.endsWith('.dsv')) {
+                    fs.writeFile('/' + f, uint8Array);
+                }
+            }
+        } catch (e) {}
+    }
 }
 
-// Фоновое автосохранение каждые 10 секунд (редкий интервал не вызывает лагов звука)
-setInterval(async () => {
-    if (!isEmulatorInitialized || !currentRomName) return;
-    const liveData = await extractSaveFromEmulator(currentRomName);
-    if (liveData) {
-        await saveSram(currentRomName, liveData);
-    }
-}, 10000);
+// Кнопка «💾 Сохранить» (принудительная фиксация текущего сохранения)
+const btnQuickSave = document.getElementById('btn-quick-save');
+if (btnQuickSave) {
+    btnQuickSave.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!currentRomName) {
+            alert('Сначала запустите игру!');
+            return;
+        }
+        const liveData = await readSaveFromDesmondDB(currentRomName);
+        if (liveData && liveData.byteLength > 0) {
+            await saveSram(currentRomName, liveData);
+            alert('Прогресс успешно зафиксирован! При следующем нажатии «Продолжить» игра запустится с этого сохранения.');
+        } else {
+            alert('Внимание: внутриигровое сохранение еще не создано! Сначала сохранитесь внутри самой игры (в Pokémon: нажмите X -> Save), а затем нажмите эту кнопку.');
+        }
+    });
+}
 
-// Экспорт .sav (теперь работает прямо во время запущенной игры)
+// Кнопка «Экспорт .sav» (работает прямо во время игры)
 document.getElementById('btn-export-sav').addEventListener('click', async (e) => {
     e.stopPropagation();
     if (!currentRomName) {
-        alert('Сначала загрузите или выберите ROM!');
+        alert('Сначала загрузите или продолжите игру!');
         return;
     }
 
-    // Сначала пробуем вытащить свежие данные из памяти запущенной игры
-    const liveData = await extractSaveFromEmulator(currentRomName);
-    if (liveData) {
+    const liveData = await readSaveFromDesmondDB(currentRomName);
+    if (liveData && liveData.byteLength > 0) {
         await saveSram(currentRomName, liveData);
+        await exportSaveFile(currentRomName);
+    } else {
+        alert('Файл сохранения пока пуст! Сначала сохранитесь внутри самой игры (через игровое меню Save), чтобы картридж создал данные .sav.');
     }
-
-    await exportSaveFile(currentRomName);
 });
 
-// Импорт .sav (работает как до, так и во время игры)
+// Кнопка «Импорт .sav» (работает во время игры и автоматически перезапускает ROM с новым сохранением)
 document.getElementById('sav-input').addEventListener('change', async (event) => {
     event.stopPropagation();
     const file = event.target.files[0];
     if (!file) return;
 
     if (!currentRomName) {
-        alert('Сначала запустите игру, для которой предназначено сохранение!');
-        event.target.value = '';
-        return;
+        const cachedRom = await getCachedRom();
+        if (cachedRom && cachedRom.name) {
+            currentRomName = cachedRom.name;
+            currentRomBuffer = cachedRom.data;
+        } else {
+            alert('Сначала выберите ROM игры, а затем импортируйте .sav!');
+            event.target.value = '';
+            return;
+        }
     }
 
     try {
         const sramData = await importSaveFile(currentRomName, file);
-        await injectSaveToEmulator(currentRomName, sramData);
-        event.target.value = ''; // Сбрасываем инпут, чтобы можно было импортировать снова
-        alert('Сохранение успешно импортировано! Перезапустите игру кнопкой «Продолжить последнюю игру», чтобы применить данные.');
+        await writeSaveToDesmondDB(currentRomName, sramData);
+        event.target.value = '';
+        alert('Сохранение импортировано! Сейчас страница перезагрузится, нажмите «Продолжить», чтобы войти в игру с загруженным сохранением.');
+        window.location.reload();
     } catch (err) {
         console.error('Ошибка импорта:', err);
     }
