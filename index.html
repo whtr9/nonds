@@ -1,1 +1,67 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <!-- Настройка viewport с запретом масштабирования и привязка manifest[cite: 1] -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="stylesheet" href="style.css">
+    <title>NDS Web Emulator</title>
+</head>
+<body>
+    <!-- Панель управления (Top Bar)[cite: 1] -->
+    <div class="top-bar">
+        <input type="file" id="rom-input" accept=".nds" hidden>
+        <button id="btn-load-rom" onclick="document.getElementById('rom-input').click()">Загрузить ROM</button>
+        <button id="btn-continue" disabled>Продолжить последнюю игру</button>
+        
+        <button id="btn-export-sav">Экспорт .sav</button>
+        <input type="file" id="sav-input" accept=".sav,.dsv" hidden>
+        <button id="btn-import-sav" onclick="document.getElementById('sav-input').click()">Импорт .sav</button>
+    </div>
 
+    <div class="emulator-layout">
+        <!-- Контейнер для двух экранов с соотношением сторон 4:3 (256x192)[cite: 1] -->
+        <div class="display-area">
+            <canvas id="top-screen" width="256" height="192"></canvas>
+            <canvas id="bottom-screen" width="256" height="192"></canvas>
+        </div>
+
+        <!-- Виртуальный геймпад (Controls Overlay)[cite: 1] -->
+        <div class="controls-overlay">
+            <div class="shoulder-buttons">
+                <button class="shoulder" data-key="l">L</button>
+                <button class="shoulder" data-key="r">R</button>
+            </div>
+            
+            <div class="d-pad-container">
+                <button class="d-pad up" data-key="up">▲</button>
+                <div class="d-pad-middle">
+                    <button class="d-pad left" data-key="left">◀</button>
+                    <button class="d-pad right" data-key="right">▶</button>
+                </div>
+                <button class="d-pad down" data-key="down">▼</button>
+            </div>
+
+            <div class="action-buttons-container">
+                <button class="action-btn x" data-key="x">X</button>
+                <div class="action-middle">
+                    <button class="action-btn y" data-key="y">Y</button>
+                    <button class="action-btn a" data-key="a">A</button>
+                </div>
+                <button class="action-btn b" data-key="b">B</button>
+            </div>
+        </div>
+        
+        <div class="system-buttons">
+            <button class="system-btn" data-key="select">Select</button>
+            <button class="system-btn" data-key="start">Start</button>
+        </div>
+    </div>
+
+    <!-- Подключение модулей[cite: 1] -->
+    <script type="module" src="storage.js"></script>
+    <script type="module" src="app.js"></script>
+</body>
+</html>
