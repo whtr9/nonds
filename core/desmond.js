@@ -2993,15 +2993,18 @@ console.log("loaded");
             }
             var mic = emuKeyState[11]
             if (mic) {
-                console.log('mic')
                 keyMask |= 1 << 14
             }
 
+            // Берем координаты тачскрина либо из внутреннего обработчика, либо из window
+            var activeTouched = window.__ndsTouched !== undefined ? window.__ndsTouched : touched;
+            var activeTouchX = window.__ndsTouchX !== undefined ? window.__ndsTouchX : touchX;
+            var activeTouchY = window.__ndsTouchY !== undefined ? window.__ndsTouchY : touchY;
 
             if (config.powerSave) {
-                Module._runFrame(0, keyMask, touched, touchX, touchY)
+                Module._runFrame(0, keyMask, activeTouched, activeTouchX, activeTouchY)
             }
-            Module._runFrame(1, keyMask, touched, touchX, touchY)
+            Module._runFrame(1, keyMask, activeTouched, activeTouchX, activeTouchY)
 
             ctx2d[0].putImageData(FB[0], 0, 0)
             ctx2d[1].putImageData(FB[1], 0, 0)
@@ -3011,19 +3014,50 @@ console.log("loaded");
                     tmpAudioBuffer.set(audioBuffer.subarray(0, samplesRead * 2))
                     audioWorkletNode.port.postMessage(tmpAudioBuffer.subarray(0, samplesRead * 2))
                 } catch (error) {
-                    // tmpAudioBuffer may be detached if previous message is still processing 
                     console.log(error)
                 }
             }
 
             frameCount += 1
-    
+            // Вызываем проверку сохранения каждые 60 кадров (~1 раз в секунду)
+            if (frameCount % 60 === 0) {
+                checkSaveGame()
+            }
         }
 
         function wasmReady() {
             Module._setSampleRate(47860)
         }
 
+        // Экспортируем функцию принудительного чтения/записи .sav из памяти ядра наружу для app.js
+        window.__desmondExtractSave = function() {
+            if (!emuIsGameLoaded || !Module._savGetSize) return null;
+            var size = Module._savGetSize();
+            if (size > 0) {
+                var ptr = Module._savGetPointer(0);
+                var buf = new Uint8Array(size);
+                buf.set(Module.HEAPU8.subarray(ptr, ptr + size));
+                if (typeof gameID !== 'undefined' && gameID) {
+                    localforage.setItem('sav-' + gameID, buf);
+                }
+                return buf;
+            }
+            return null;
+        };
+
+        window.__desmondInjectSave = function(u8Array) {
+            if (!u8Array || !u8Array.byteLength) return;
+            if (typeof gameID !== 'undefined' && gameID) {
+                localforage.setItem('sav-' + gameID, u8Array);
+            }
+            if (emuIsGameLoaded && Module._savGetPointer) {
+                var ptr = Module._savGetPointer(u8Array.byteLength);
+                if (ptr) {
+                    Module.HEAPU8.set(u8Array, ptr);
+                    Module._savUpdateChangeFlag();
+                }
+            }
+        };
 
         function checkSaveGame() {
             var saveUpdateFlag = Module._savUpdateChangeFlag()
@@ -3034,7 +3068,9 @@ console.log("loaded");
                     var tmpSaveBuf = new Uint8Array(size)
                     tmpSaveBuf.set(Module.HEAPU8.subarray(ptr, ptr + size))
                     localforage.setItem('sav-' + gameID, tmpSaveBuf)
-                    showMsg('Auto saving...')
+                    if (window.__onDesmondAutoSave) {
+                        window.__onDesmondAutoSave(tmpSaveBuf)
+                    }
                 }
             }
             prevSaveFlag = saveUpdateFlag
@@ -3053,17 +3089,18 @@ console.log("loaded");
                 gameID += (header[i] == 0) ? ' ' : String.fromCharCode(header[i])
             }
             if (gameID[0xC] == '#') {
-                // a homebrew!
                 gameID = file.name
             }
+            window.__desmondGameID = gameID;
             console.log('gameID', gameID)
             romSize = file.size
             var romBufPtr = Module._prepareRomBuffer(romSize)
             console.log(romSize, romBufPtr)
             Module.HEAPU8.set(new Uint8Array(await file.arrayBuffer()), romBufPtr);
-            var saveData = await localforage.getItem('sav-' + gameID)
+            var saveData = window.__pendingSaveData || await localforage.getItem('sav-' + gameID)
             if (saveData) {
-                Module.HEAPU8.set(saveData, Module._savGetPointer(saveData.length))
+                var u8Save = saveData instanceof Uint8Array ? saveData : new Uint8Array(saveData);
+                Module.HEAPU8.set(u8Save, Module._savGetPointer(u8Save.byteLength))
             }
             Module._savUpdateChangeFlag()
             var ret = Module._loadROM(romSize);
@@ -3071,7 +3108,6 @@ console.log("loaded");
                 alert('LoadROM failed.')
                 return;
             }
-
 
             ptrFrontBuffer = Module._getSymbol(5)
             var fb = Module._getSymbol(4)
@@ -3083,14 +3119,10 @@ console.log("loaded");
             console.log('Start!!!')
             emuIsGameLoaded = true
             emuIsRunning = true
-shadow.querySelector("#player").hidden = false;
-                  callPlugin('loaded', gameID)
+            shadow.querySelector("#player").hidden = false;
+            callPlugin('loaded', gameID)
         }
 
-       
-
-
-        // must be called in user gesture
         function tryInitSound() {
             try {
                 if (audioContext) {
@@ -3112,41 +3144,33 @@ shadow.querySelector("#player").hidden = false;
         this.fifoHead = 0
         this.fifoLen = 0
         this.port.onmessage = (e) => {
-            //console.log(this.fifoLen)
             var buf = e.data
             var samplesReceived = buf.length / 2
             if (this.fifoLen + samplesReceived >= this.FIFO_CAP) {
-                console.log('o')
                 return
             }
-
             for (var i = 0; i < buf.length; i+=2) {
                 this.fifoEnqueue(buf[i], buf[i+1])
             }
         }
     }
-
     fifoDequeue() {
         this.fifoHead += 1
         this.fifoHead %= this.FIFO_CAP
         this.fifoLen -= 1
     }
-
     fifoEnqueue(a, b) {
         const pos = (this.fifoHead + this.fifoLen) % this.FIFO_CAP
         this.fifo0[pos] = a
         this.fifo1[pos] = b
         this.fifoLen += 1
     }
-
     process(inputs, outputs, parameters) {
         const output = outputs[0]
         const chan0 = output[0]
         const chan1 = output[1]
-
         for (var i = 0; i < chan0.length; i++) {
             if (this.fifoLen < 1) {
-                console.log("u")
                 break
             }
             chan0[i] = this.fifo0[this.fifoHead] / 32768.0
@@ -3156,24 +3180,20 @@ shadow.querySelector("#player").hidden = false;
         return true
     }
 }
-
 registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).then(() => {
                         audioWorkletNode = new AudioWorkletNode(audioContext, "my-worklet", { outputChannelCount: [2] })
                         audioWorkletNode.connect(audioContext.destination)
                     })
                 }
-
                 audioContext.resume()
             } catch (e) {
                 console.log(e)
-                //alert('Cannnot init sound ')
             }
         }
 
         var prevRunFrameTime = performance.now()
         function emuLoop() {
             window.requestAnimationFrame(emuLoop)
-
             if (emuIsRunning) {
                 if (config.powerSave) {
                     if (performance.now() - prevRunFrameTime < 32) {
@@ -3186,176 +3206,52 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
         }
         emuLoop()
 
-        var stickTouchID = null
-        var tpadTouchID = null
-
-        function isPointInRect(x, y, r) {
-            if ((x >= r.x) && (x < r.x + r.width)) {
-                if ((y >= r.y) && (y < r.y + r.height)) {
-                    return true
-                }
+        // Прямой и чистый обработчик тачскрина ТОЛЬКО на нижнем экране (screenCanvas[1])
+        // Не ломает кнопки интерфейса и работает без vkStickPos!
+        function updateStylusFromEvent(clientX, clientY, isDown) {
+            tryInitSound();
+            if (!emuIsRunning) return;
+            var r = screenCanvas[1].getBoundingClientRect();
+            if (!isDown) {
+                touched = 0;
+                window.__ndsTouched = 0;
+                return;
             }
-            return false
+            var x = Math.max(0, Math.min(255, Math.floor(((clientX - r.left) / r.width) * 256)));
+            var y = Math.max(0, Math.min(191, Math.floor(((clientY - r.top) / r.height) * 192)));
+            touched = 1;
+            touchX = x;
+            touchY = y;
+            window.__ndsTouched = 1;
+            window.__ndsTouchX = x;
+            window.__ndsTouchY = y;
         }
 
-        function clamp01(a) {
-            if (a < 0) {
-                return 0
-            }
-            if (a > 1) {
-                return 1
-            }
-            return a
-        }
+        screenCanvas[1].addEventListener('pointerdown', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            screenCanvas[1].setPointerCapture(e.pointerId);
+            updateStylusFromEvent(e.clientX, e.clientY, true);
+        }, { passive: false });
 
-        function handleTouch(event) {
-            tryInitSound()
-            if (!emuIsRunning) {
-                return
-            }
-            event.preventDefault();
-            event.stopPropagation();
+        screenCanvas[1].addEventListener('pointermove', function(e) {
+            if (!touched && !window.__ndsTouched) return;
+            e.preventDefault();
+            e.stopPropagation();
+            updateStylusFromEvent(e.clientX, e.clientY, true);
+        }, { passive: false });
 
-            var isDown = false
-            var x = 0
-            var y = 0
+        screenCanvas[1].addEventListener('pointerup', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            updateStylusFromEvent(e.clientX, e.clientY, false);
+        }, { passive: false });
 
-            var needUpdateStick = false
-            var stickY = vkStickPos[0]
-            var stickX = vkStickPos[1]
-            var stickW = vkStickPos[2]
-            var stickH = vkStickPos[3]
-
-            var stickPressed = false
-            var stickDeadZone = stickW * 0.4
-
-            var nextStickTouchID = null
-            var nextTpadTouchID = null
-
-            var tsRect = screenCanvas[1].getBoundingClientRect()
-
-            for (var i = 0; i < emuKeyState.length; i++) {
-                emuKeyState[i] = false
-            }
-            for (var k in vkState) {
-                vkState[k][1] = 0
-            }
-
-            for (var i = 0; i < event.touches.length; i++) {
-                var t = event.touches[i];
-                var tid = t.identifier
-                var dom = document.elementFromPoint(t.clientX, t.clientY)
-                var k = dom ? dom.getAttribute('data-k') : null
-
-                if ((tid === stickTouchID) || ((dom == vkMap['stick']) && (tid != tpadTouchID))) {
-                    stickPressed = true
-
-                    vkState['stick'][1] = 1
-                    var sx = t.clientX
-                    var sy = t.clientY
-                    if (sx < stickX - stickDeadZone) {
-                        emuKeyState[1] = true
-                    }
-                    if (sx > stickX + stickDeadZone) {
-                        emuKeyState[0] = true
-                    }
-                    if (sy < stickY - stickDeadZone) {
-                        emuKeyState[3] = true
-                    }
-                    if (sy > stickY + stickDeadZone) {
-                        emuKeyState[2] = true
-                    }
-                    sx = Math.max(stickX - stickW / 2, sx)
-                    sx = Math.min(stickX + stickW / 2, sx)
-                    sy = Math.max(stickY - stickH / 2, sy)
-                    sy = Math.min(stickY + stickH / 2, sy)
-                    stickX = sx
-                    stickY = sy
-                    needUpdateStick = true
-                    nextStickTouchID = tid
-                    continue
-                }
-                if ((tid === tpadTouchID) || (isPointInRect(t.clientX, t.clientY, tsRect) && (!k))) {
-                    isDown = true
-                    x = clamp01((t.clientX - tsRect.x) / tsRect.width) * 256
-                    y = clamp01((t.clientY - tsRect.y) / tsRect.height) * 192
-                    nextTpadTouchID = tid
-                    continue
-                }
-                if (k) {
-
-                    vkState[k][1] = 1
-                    continue
-                }
-            }
-
-            touched = isDown ? 1 : 0;
-            touchX = x
-            touchY = y
-
-            for (var k in vkState) {
-                if (vkState[k][0] != vkState[k][1]) {
-                    var dom = vkMap[k]
-                    vkState[k][0] = vkState[k][1]
-                    if (vkState[k][1]) {
-                        dom.classList.add('vk-touched')
-                        if (k == 'menu') {
-                            uiSwitchTo('menu')
-                        }
-                    } else {
-                        dom.classList.remove('vk-touched')
-                        if (k == "stick") {
-                            needUpdateStick = true
-                        }
-                    }
-
-                }
-            }
-
-            for (var i = 0; i < emuKeyState.length; i++) {
-                var k = emuKeyNames[i]
-                if (vkState[k]) {
-                    if (vkState[k][1]) {
-                        emuKeyState[i] = true
-                    }
-                }
-            }
-
-            if (needUpdateStick) {
-                vkMap['stick'].style = makeVKStyle(stickY - stickW / 2, stickX - stickW / 2, stickW, stickH, vkStickPos[4])
-            }
-
-            stickTouchID = nextStickTouchID
-            tpadTouchID = nextTpadTouchID
-        }
-        ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'touchenter', 'touchleave'].forEach((val) => {
-            window.addEventListener(val, handleTouch)
-        })
-
-
-
-
-        window.onmousedown = window.onmouseup = window.onmousemove = (e) => {
-            if (!emuIsRunning) {
-                return
-            }
-            if (e.type == 'mousedown') {
-                tryInitSound()
-            }
-
-            var r = screenCanvas[1].getBoundingClientRect()
-
-            e.preventDefault()
-            e.stopPropagation()
-
-            var isDown = (e.buttons != 0) && (isPointInRect(e.clientX, e.clientY, r))
-            var x = (e.clientX - r.x) / r.width * 256
-            var y = (e.clientY - r.y) / r.height * 192
-
-            touched = isDown ? 1 : 0;
-            touchX = x
-            touchY = y
-        }
+        screenCanvas[1].addEventListener('pointercancel', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            updateStylusFromEvent(0, 0, false);
+        }, { passive: false });
 
         function convertKeyCode(keyCode) {
             for (var i = 0; i < 14; i++) {
@@ -3365,18 +3261,25 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
             }
             return -1
         }
+
+        // Открываем прямое управление кнопками для app.js без костылей с KeyboardEvent
+        window.__desmondSetButton = function(keyName, isDown) {
+            tryInitSound();
+            var idx = keyNameToKeyId[keyName];
+            if (idx !== undefined && idx >= 0) {
+                emuKeyState[idx] = !!isDown;
+            }
+        };
+
         window.onkeydown = window.onkeyup = (e) => {
             if (!emuIsRunning) {
                 return
             }
-            e.preventDefault()
             var isDown = (e.type === "keydown")
             var k = convertKeyCode(e.keyCode)
             if (k >= 0) {
+                e.preventDefault()
                 emuKeyState[k] = isDown
-            }
-            if (e.keyCode == 27) {
-                uiSwitchTo('menu')
             }
         }
 
@@ -3397,12 +3300,7 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
         }
 
         window.addEventListener("gamepadconnected", function (e) {
-            console.log("Gamepad connected at index %d: %s. %d buttons, %d axes.",
-                e.gamepad.index, e.gamepad.id,
-                e.gamepad.buttons.length, e.gamepad.axes.length);
-            showMsg('Gamepad connected.')
             currentConnectedGamepad = e.gamepad.index
-
         });
 
         function processGamepadInput() {
@@ -3411,7 +3309,6 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
             }
             var gamepad = navigator.getGamepads()[currentConnectedGamepad]
             if (!gamepad) {
-                showMsg('Gamepad disconnected.')
                 currentConnectedGamepad = -1
                 return
             }
@@ -3436,7 +3333,7 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
                 emuKeyState[keyNameToKeyId['down']] = true
             }
         }
-
+        
         function whatsNew() {
             alert(`
 1. Added setting option to hide the virtual keyboard.
