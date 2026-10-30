@@ -23,9 +23,9 @@
 
     <div class="emulator-layout">
         <!-- Контейнер для двух экранов с соотношением сторон 4:3 (256x192)[cite: 1] -->
+        <!-- Было два canvas, стало: -->
         <div class="display-area">
-            <canvas id="top-screen" width="256" height="192"></canvas>
-            <canvas id="bottom-screen" width="256" height="192"></canvas>
+            <desmond-player id="player"></desmond-player>
         </div>
 
         <!-- Виртуальный геймпад (Controls Overlay)[cite: 1] -->

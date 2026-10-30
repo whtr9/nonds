@@ -6,8 +6,8 @@ const ASSETS_TO_CACHE = [
     './app.js',
     './storage.js',
     './manifest.webmanifest',
-    './core/desmume.js',
-    './core/desmume.wasm'
+    './core/desmond.js',   // Было desmume.js
+    './core/desmond.wasm'  // Было desmume.wasm
 ];
 
 // Событие install: Открытие кэша и принудительное кэширование всех статических ассетов[cite: 1]
