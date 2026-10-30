@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nds-pwa-v1.7';
+const CACHE_NAME = 'nds-pwa-v2';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',

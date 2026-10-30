@@ -3,16 +3,26 @@ import { saveRomToCache, getCachedRom, loadSram, saveSram, exportSaveFile, impor
 let currentRomName = '';
 let isEmulatorInitialized = false;
 
-// 1. Регистрация Service Worker
+// 0. Оптимизация звука: перехватываем создание AudioContext внутри Desmond,
+// чтобы задать буфер 'interactive' и снизить прерывания звука
+const OriginalAudioContext = window.AudioContext || window.webkitAudioContext;
+if (OriginalAudioContext) {
+    window.AudioContext = window.webkitAudioContext = function(options = {}) {
+        options.latencyHint = 'interactive';
+        const ctx = new OriginalAudioContext(options);
+        window.__desmondAudioCtx = ctx;
+        return ctx;
+    };
+}
+
+// 1. Регистрация Service Worker[cite: 2, 5]
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
-            .then(reg => console.log('Service Worker зарегистрирован:', reg.scope))
-            .catch(err => console.error('Ошибка регистрации SW:', err));
+        navigator.serviceWorker.register('./sw.js').catch(err => console.error(err));
     });
 }
 
-// 2. Проверка кэшированной игры при запуске
+// 2. Проверка кэшированной игры при запуске[cite: 2, 3]
 document.addEventListener('DOMContentLoaded', async () => {
     try {
         const cachedRom = await getCachedRom();
@@ -28,7 +38,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 });
 
-// 3. Загрузка нового ROM через input
+// 3. Загрузка нового ROM через input[cite: 2, 3]
 document.getElementById('rom-input').addEventListener('change', async (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -37,14 +47,19 @@ document.getElementById('rom-input').addEventListener('change', async (event) =>
         const arrayBuffer = await file.arrayBuffer();
         await saveRomToCache(file.name, arrayBuffer);
         loadEmulatorAndRun(file.name, arrayBuffer);
+        event.target.value = ''; // Сброс инпута, чтобы работал повторный выбор
     } catch (error) {
         console.error('Ошибка чтения ROM файла:', error);
     }
 });
 
-// 4. Подключение desmond.js и запуск игры через Blob URL
+// 4. Подключение desmond.js, выравнивание экранов и запуск
 async function loadEmulatorAndRun(romName, arrayBuffer) {
     currentRomName = romName;
+
+    if (window.__desmondAudioCtx && window.__desmondAudioCtx.state === 'suspended') {
+        window.__desmondAudioCtx.resume();
+    }
 
     if (!isEmulatorInitialized) {
         await new Promise((resolve, reject) => {
@@ -57,39 +72,54 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
         isEmulatorInitialized = true;
     }
 
-    // Восстановление сохранения перед запуском (если есть в нашей БД)
+    // Восстанавливаем сохранение перед стартом игры
     const sramData = await loadSram(romName);
-    if (sramData && window.Module && window.Module.FS) {
-        try {
-            const savName = romName.replace(/\.nds$/i, '.sav');
-            window.Module.FS.writeFile(savName, sramData);
-        } catch (e) {
-            console.warn('FS ещё не инициализирована для прямой записи .sav');
-        }
+    if (sramData) {
+        injectSaveToEmulator(romName, sramData);
     }
 
-    // Desmond принимает путь к файлу в метод loadURL().
-    // Создаем локальный Blob URL из ArrayBuffer для работы в 100% офлайне:
     const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
     const romUrl = URL.createObjectURL(blob);
-
     const player = document.getElementById('player');
+
+    const startPlayer = () => {
+        player.loadURL(romUrl, () => {
+            fixDesmondShadowDOM(player);
+            if (sramData) injectSaveToEmulator(romName, sramData);
+        });
+        // На случай если версия desmond.js не вызывает callback в loadURL:
+        setTimeout(() => fixDesmondShadowDOM(player), 500);
+    };
+
     if (player && typeof player.loadURL === 'function') {
-        player.loadURL(romUrl);
+        startPlayer();
     } else {
-        // Небольшая задержка, если веб-компонент только что зарегистрировался
-        setTimeout(() => {
-            document.getElementById('player').loadURL(romUrl);
-        }, 300);
+        setTimeout(startPlayer, 350);
     }
 }
 
+// Снимает жесткую привязку к левому верхнему углу внутри Shadow DOM плеера
+// и активирует тачскрин на нижнем экране
+function fixDesmondShadowDOM(player) {
+    if (!player) return;
+    const root = player.shadowRoot || player;
+    const canvases = root.querySelectorAll('canvas');
+    canvases.forEach((canvas) => {
+        canvas.style.position = 'relative';
+        canvas.style.top = 'auto';
+        canvas.style.left = 'auto';
+        canvas.style.width = '256px';
+        canvas.style.height = '192px';
+        canvas.style.display = 'block';
+        canvas.style.pointerEvents = 'auto';
+        canvas.style.touchAction = 'none';
+    });
+}
+
 /* ==========================================
-   Управление: Трансляция экранных кнопок в клавиши Desmond
+   Управление: Геймпад и фикс Start / Select
    ========================================== */
 
-// Desmond по умолчанию слушает стандартные клавиатурные события на window/document:
-// Z = B, X = A, A = Y, S = X, Q = L, W = R, Enter = Start, Shift = Select, Стрелки = D-Pad
 const desmondKeyMap = {
     'a':      { key: 'x', code: 'KeyX', keyCode: 88 },
     'b':      { key: 'z', code: 'KeyZ', keyCode: 90 },
@@ -110,25 +140,40 @@ function triggerDesmondKey(btnKey, isPressed) {
     if (!map) return;
 
     const eventType = isPressed ? 'keydown' : 'keyup';
-    const event = new KeyboardEvent(eventType, {
-        key: map.key,
-        code: map.code,
-        keyCode: map.keyCode,
-        which: map.keyCode,
-        bubbles: true,
-        cancelable: true
-    });
 
-    window.dispatchEvent(event);
-    document.dispatchEvent(event);
+    // В старых сборках Emscripten/Desmond свойство keyCode в конструкторе KeyboardEvent
+    // часто игнорируется и равно 0, из-за чего не работают Enter (Start) и Shift (Select).
+    // Принудительно задаем keyCode и which через Object.defineProperty:
+    const createKeyEvent = (codeVal, keyName, codeName) => {
+        const ev = new KeyboardEvent(eventType, {
+            key: keyName,
+            code: codeName,
+            bubbles: true,
+            cancelable: true
+        });
+        Object.defineProperty(ev, 'keyCode', { get: () => codeVal });
+        Object.defineProperty(ev, 'which', { get: () => codeVal });
+        return ev;
+    };
+
+    const ev = createKeyEvent(map.keyCode, map.key, map.code);
+    window.dispatchEvent(ev);
+    document.dispatchEvent(ev);
+
+    // Дублируем Select на Backspace (код 8), так как ряд сборок Desmond мапит Select на него
+    if (btnKey === 'select') {
+        const altEv = createKeyEvent(8, 'Backspace', 'Backspace');
+        window.dispatchEvent(altEv);
+        document.dispatchEvent(altEv);
+    }
 }
 
-// Навешивание мультитач-событий на ваши экранные кнопки
 document.querySelectorAll('button[data-key]').forEach(btn => {
     const key = btn.getAttribute('data-key');
 
     btn.addEventListener('pointerdown', (e) => {
         e.preventDefault();
+        btn.blur(); // Убираем фокус с кнопки, чтобы Enter (Start) не вызывал клик по ней
         btn.classList.add('active');
         triggerDesmondKey(key, true);
     });
@@ -145,26 +190,118 @@ document.querySelectorAll('button[data-key]').forEach(btn => {
 });
 
 /* ==========================================
-   Система сохранений (.sav / localforage / FS)
+   Система сохранений (.sav): Синхронизация с ядром Desmond
    ========================================== */
 
-// Экспорт и импорт .sav через ваш storage.js
-document.getElementById('btn-export-sav').addEventListener('click', () => {
-    if (!currentRomName) return alert('Сначала запустите игру!');
-    exportSaveFile(currentRomName);
+// Функция извлечения текущего .sav напрямую из памяти работающего эмулятора
+async function extractSaveFromEmulator(romName) {
+    const savName = romName.replace(/\.nds$/i, '.sav');
+    const dsvName = romName.replace(/\.nds$/i, '.dsv');
+
+    // 1. Проверяем виртуальную файловую систему Emscripten (Module.FS)
+    if (window.Module && window.Module.FS) {
+        const fs = window.Module.FS;
+        try {
+            // Ищем любой созданный ядром файл сохранения (.sav или .dsv) в корне '/'
+            const files = fs.readdir('/');
+            for (const f of files) {
+                if (f.endsWith('.sav') || f.endsWith('.dsv') || f === savName || f === dsvName) {
+                    const data = fs.readFile('/' + f);
+                    if (data && data.length > 0) return new Uint8Array(data);
+                }
+            }
+        } catch (e) {
+            // Игнорируем ошибки чтения
+        }
+    }
+
+    // 2. Если сборка Desmond хранит сохранения через встроенный localforage
+    if (window.localforage) {
+        try {
+            const keys = await window.localforage.keys();
+            for (const k of keys) {
+                if (k.includes('sav') || k.includes('save') || k.includes(romName)) {
+                    const data = await window.localforage.getItem(k);
+                    if (data) return new Uint8Array(data);
+                }
+            }
+        } catch (e) {}
+    }
+
+    return null;
+}
+
+// Запись сохранения во все доступные хранилища ядра
+async function injectSaveToEmulator(romName, uint8Array) {
+    const savName = romName.replace(/\.nds$/i, '.sav');
+
+    if (window.Module && window.Module.FS) {
+        const fs = window.Module.FS;
+        try {
+            fs.writeFile('/' + savName, uint8Array);
+            // Перезаписываем также текущий активный .sav файл, если он был назван по Blob URL
+            const files = fs.readdir('/');
+            for (const f of files) {
+                if (f.endsWith('.sav') || f.endsWith('.dsv')) {
+                    fs.writeFile('/' + f, uint8Array);
+                }
+            }
+        } catch (e) {}
+    }
+
+    if (window.localforage) {
+        try {
+            const keys = await window.localforage.keys();
+            for (const k of keys) {
+                await window.localforage.setItem(k, uint8Array);
+            }
+        } catch (e) {}
+    }
+}
+
+// Фоновое автосохранение каждые 10 секунд (редкий интервал не вызывает лагов звука)
+setInterval(async () => {
+    if (!isEmulatorInitialized || !currentRomName) return;
+    const liveData = await extractSaveFromEmulator(currentRomName);
+    if (liveData) {
+        await saveSram(currentRomName, liveData);
+    }
+}, 10000);
+
+// Экспорт .sav (теперь работает прямо во время запущенной игры)
+document.getElementById('btn-export-sav').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!currentRomName) {
+        alert('Сначала загрузите или выберите ROM!');
+        return;
+    }
+
+    // Сначала пробуем вытащить свежие данные из памяти запущенной игры
+    const liveData = await extractSaveFromEmulator(currentRomName);
+    if (liveData) {
+        await saveSram(currentRomName, liveData);
+    }
+
+    await exportSaveFile(currentRomName);
 });
 
+// Импорт .sav (работает как до, так и во время игры)
 document.getElementById('sav-input').addEventListener('change', async (event) => {
+    event.stopPropagation();
     const file = event.target.files[0];
-    if (!file || !currentRomName) return alert('Сначала запустите игру!');
+    if (!file) return;
+
+    if (!currentRomName) {
+        alert('Сначала запустите игру, для которой предназначено сохранение!');
+        event.target.value = '';
+        return;
+    }
 
     try {
         const sramData = await importSaveFile(currentRomName, file);
-        if (window.Module && window.Module.FS) {
-            const savName = currentRomName.replace(/\.nds$/i, '.sav');
-            window.Module.FS.writeFile(savName, sramData);
-        }
-        alert('Сохранение импортировано! Перезапустите игру (Продолжить последнюю игру).');
+        await injectSaveToEmulator(currentRomName, sramData);
+        event.target.value = ''; // Сбрасываем инпут, чтобы можно было импортировать снова
+        alert('Сохранение успешно импортировано! Перезапустите игру кнопкой «Продолжить последнюю игру», чтобы применить данные.');
     } catch (err) {
         console.error('Ошибка импорта:', err);
     }
