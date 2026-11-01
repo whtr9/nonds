@@ -3090,7 +3090,13 @@ console.log("loaded");
         }
 
         function wasmReady() {
-            Module._setSampleRate(47860)
+            Module._setSampleRate(47860);
+            isWasmReady = true;
+            if (pendingRomCallback) {
+                var cb = pendingRomCallback;
+                pendingRomCallback = null;
+                cb();
+            }
         }
 
         // Экспортируем функцию принудительного чтения/записи .sav из памяти ядра наружу для app.js
@@ -3270,14 +3276,28 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
         }
         emuLoop()
 
-       function updateStylusFromEvent(clientX, clientY, isDown) {
+       function checkAndUpdateStylus(clientX, clientY, isDown, targetEl) {
             tryInitSound();
-            var r = screenCanvas[1].getBoundingClientRect();
-            if (!isDown || r.width === 0 || r.height === 0) {
+            if (!isDown) {
                 touched = 0;
                 window.__ndsTouched = 0;
-                return;
+                return false;
             }
+            // Если пользователь нажал на физическую кнопку интерфейса (A, B, Start и т.д.) — не трогаем тачскрин
+            if (targetEl && targetEl.closest && targetEl.closest('button')) {
+                return false;
+            }
+            var bottomCanvas = screenCanvas[1];
+            if (!bottomCanvas) return false;
+            var r = bottomCanvas.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return false;
+
+            // Проверяем, попала ли точка нажатия (или ведения стилуса) в область нижнего экрана
+            var isInside = (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom);
+            if (!isInside && !touched) {
+                return false;
+            }
+
             var x = Math.max(0, Math.min(255, Math.floor(((clientX - r.left) / r.width) * 256)));
             var y = Math.max(0, Math.min(191, Math.floor(((clientY - r.top) / r.height) * 192)));
             touched = 1;
@@ -3286,58 +3306,58 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
             window.__ndsTouched = 1;
             window.__ndsTouchX = x;
             window.__ndsTouchY = y;
+            return true;
         }
 
-        const bottomCanvas = screenCanvas[1];
-
-        if (window.PointerEvent) {
-            bottomCanvas.addEventListener('pointerdown', function(e) {
+        // Перехватываем события на уровне window (capture: true), чтобы никакой z-index или Shadow DOM не мешал
+        window.addEventListener('pointerdown', function(e) {
+            if (checkAndUpdateStylus(e.clientX, e.clientY, true, e.target)) {
                 e.preventDefault();
-                e.stopPropagation();
-                if (bottomCanvas.setPointerCapture) {
-                    try { bottomCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+            }
+        }, { capture: true, passive: false });
+
+        window.addEventListener('pointermove', function(e) {
+            if (!touched && !window.__ndsTouched) return;
+            if (checkAndUpdateStylus(e.clientX, e.clientY, true, null)) {
+                e.preventDefault();
+            }
+        }, { capture: true, passive: false });
+
+        window.addEventListener('pointerup', function(e) {
+            if (touched || window.__ndsTouched) {
+                checkAndUpdateStylus(0, 0, false, null);
+            }
+        }, { capture: true, passive: false });
+
+        window.addEventListener('pointercancel', function(e) {
+            if (touched || window.__ndsTouched) {
+                checkAndUpdateStylus(0, 0, false, null);
+            }
+        }, { capture: true, passive: false });
+
+        // Дублирующий fallback специально для мобильных браузеров (touchstart/touchmove/touchend)
+        window.addEventListener('touchstart', function(e) {
+            if (e.touches && e.touches.length > 0) {
+                if (checkAndUpdateStylus(e.touches[0].clientX, e.touches[0].clientY, true, e.target)) {
+                    e.preventDefault();
                 }
-                updateStylusFromEvent(e.clientX, e.clientY, true);
-            }, { passive: false });
+            }
+        }, { capture: true, passive: false });
 
-            bottomCanvas.addEventListener('pointermove', function(e) {
-                if (!touched && !window.__ndsTouched) return;
-                e.preventDefault();
-                e.stopPropagation();
-                updateStylusFromEvent(e.clientX, e.clientY, true);
-            }, { passive: false });
-
-            bottomCanvas.addEventListener('pointerup', function(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                updateStylusFromEvent(e.clientX, e.clientY, false);
-            }, { passive: false });
-
-            bottomCanvas.addEventListener('pointercancel', function(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                updateStylusFromEvent(0, 0, false);
-            }, { passive: false });
-        } else {
-            bottomCanvas.addEventListener('touchstart', function(e) {
-                e.preventDefault();
-                if (e.touches.length > 0) {
-                    updateStylusFromEvent(e.touches[0].clientX, e.touches[0].clientY, true);
+        window.addEventListener('touchmove', function(e) {
+            if (!touched && !window.__ndsTouched) return;
+            if (e.touches && e.touches.length > 0) {
+                if (checkAndUpdateStylus(e.touches[0].clientX, e.touches[0].clientY, true, null)) {
+                    e.preventDefault();
                 }
-            }, { passive: false });
+            }
+        }, { capture: true, passive: false });
 
-            bottomCanvas.addEventListener('touchmove', function(e) {
-                e.preventDefault();
-                if (e.touches.length > 0) {
-                    updateStylusFromEvent(e.touches[0].clientX, e.touches[0].clientY, true);
-                }
-            }, { passive: false });
-
-            bottomCanvas.addEventListener('touchend', function(e) {
-                e.preventDefault();
-                updateStylusFromEvent(0, 0, false);
-            }, { passive: false });
-        }
+        window.addEventListener('touchend', function(e) {
+            if (touched || window.__ndsTouched) {
+                checkAndUpdateStylus(0, 0, false, null);
+            }
+        }, { capture: true, passive: false });
 
         function convertKeyCode(keyCode) {
             for (var i = 0; i < 14; i++) {
