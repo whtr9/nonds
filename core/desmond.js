@@ -2799,12 +2799,76 @@ module.exports = localforage_js;
       var player = document.querySelector("desmond-player");
       if (player) {
       var shadow = player.attachShadow({mode: "open"});
-      shadow.innerHTML=`<div id="player">
+      shadow.innerHTML = `
+      <style>
+        :host {
+          display: flex !important;
+          flex-direction: column !important;
+          align-items: center !important;
+          justify-content: center !important;
+          width: 312px !important;
+          height: 468px !important;
+          user-select: none;
+          -webkit-user-select: none;
+          touch-action: none;
+        }
+        #player {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          width: 312px;
+          height: 468px;
+          touch-action: none;
+        }
+        canvas {
+          width: 312px !important;
+          height: 234px !important;
+          display: block !important;
+          image-rendering: pixelated;
+          image-rendering: crisp-edges;
+          touch-action: none !important;
+          pointer-events: auto !important;
+        }
+      </style>
+      <div id="player">
         <canvas id="top" width="256" height="192"></canvas>
-        <canvas id="bottom" width="256" height="192"></canvas>`;
-              var getFileBlob=function(e,t){var n=new XMLHttpRequest;n.open('GET',e),n.responseType='blob',n.addEventListener('load',function(){t(n.response)}),n.send()},blobToFile=function(e,t){return e.lastModifiedDate=new Date,e.name=t,e},getFileObject=function(e,t){getFileBlob(e,function(e){t(blobToFile(e,'test.jpg'))})};function loadURL(e, a){getFileObject(e,function(e){console.log(e),tryLoadROM(e),status();a()})}; 
-       player.loadURL = function(u, cb) { 
-         player.enableMicrophone = function() {
+        <canvas id="bottom" width="256" height="192"></canvas>
+      </div>`;
+var isWasmReady = false;
+      var pendingRomCallback = null;
+
+      var getFileBlob = function(e, t) {
+          var n = new XMLHttpRequest;
+          n.open('GET', e);
+          n.responseType = 'blob';
+          n.addEventListener('load', function() { t(n.response); });
+          n.send();
+      };
+      var blobToFile = function(e, t) {
+          e.lastModifiedDate = new Date();
+          e.name = t;
+          return e;
+      };
+      var getFileObject = function(e, t) {
+          getFileBlob(e, function(b) { t(blobToFile(b, 'rom.nds')); });
+      };
+      function loadURL(url, cb) {
+          getFileObject(url, function(file) {
+              var startLoad = async function() {
+                  await tryLoadROM(file);
+                  status();
+                  if (typeof cb === 'function') cb();
+              };
+              if (isWasmReady) {
+                  startLoad();
+              } else {
+                  pendingRomCallback = startLoad;
+              }
+          });
+      }       
+      player.loadURL = function(u, cb) { 
+    player.enableMicrophone = function() {
     var micPtr = Module._realloc(0, 0x1000)
     var micBuf = Module.HEAPU8.subarray(micPtr, micPtr + 0x1000)
     console.log(micPtr, micBuf)
@@ -3206,13 +3270,10 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
         }
         emuLoop()
 
-        // Прямой и чистый обработчик тачскрина ТОЛЬКО на нижнем экране (screenCanvas[1])
-        // Не ломает кнопки интерфейса и работает без vkStickPos!
-        function updateStylusFromEvent(clientX, clientY, isDown) {
+       function updateStylusFromEvent(clientX, clientY, isDown) {
             tryInitSound();
-            if (!emuIsRunning) return;
             var r = screenCanvas[1].getBoundingClientRect();
-            if (!isDown) {
+            if (!isDown || r.width === 0 || r.height === 0) {
                 touched = 0;
                 window.__ndsTouched = 0;
                 return;
@@ -3227,31 +3288,56 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
             window.__ndsTouchY = y;
         }
 
-        screenCanvas[1].addEventListener('pointerdown', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            screenCanvas[1].setPointerCapture(e.pointerId);
-            updateStylusFromEvent(e.clientX, e.clientY, true);
-        }, { passive: false });
+        const bottomCanvas = screenCanvas[1];
 
-        screenCanvas[1].addEventListener('pointermove', function(e) {
-            if (!touched && !window.__ndsTouched) return;
-            e.preventDefault();
-            e.stopPropagation();
-            updateStylusFromEvent(e.clientX, e.clientY, true);
-        }, { passive: false });
+        if (window.PointerEvent) {
+            bottomCanvas.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (bottomCanvas.setPointerCapture) {
+                    try { bottomCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+                }
+                updateStylusFromEvent(e.clientX, e.clientY, true);
+            }, { passive: false });
 
-        screenCanvas[1].addEventListener('pointerup', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            updateStylusFromEvent(e.clientX, e.clientY, false);
-        }, { passive: false });
+            bottomCanvas.addEventListener('pointermove', function(e) {
+                if (!touched && !window.__ndsTouched) return;
+                e.preventDefault();
+                e.stopPropagation();
+                updateStylusFromEvent(e.clientX, e.clientY, true);
+            }, { passive: false });
 
-        screenCanvas[1].addEventListener('pointercancel', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            updateStylusFromEvent(0, 0, false);
-        }, { passive: false });
+            bottomCanvas.addEventListener('pointerup', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                updateStylusFromEvent(e.clientX, e.clientY, false);
+            }, { passive: false });
+
+            bottomCanvas.addEventListener('pointercancel', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                updateStylusFromEvent(0, 0, false);
+            }, { passive: false });
+        } else {
+            bottomCanvas.addEventListener('touchstart', function(e) {
+                e.preventDefault();
+                if (e.touches.length > 0) {
+                    updateStylusFromEvent(e.touches[0].clientX, e.touches[0].clientY, true);
+                }
+            }, { passive: false });
+
+            bottomCanvas.addEventListener('touchmove', function(e) {
+                e.preventDefault();
+                if (e.touches.length > 0) {
+                    updateStylusFromEvent(e.touches[0].clientX, e.touches[0].clientY, true);
+                }
+            }, { passive: false });
+
+            bottomCanvas.addEventListener('touchend', function(e) {
+                e.preventDefault();
+                updateStylusFromEvent(0, 0, false);
+            }, { passive: false });
+        }
 
         function convertKeyCode(keyCode) {
             for (var i = 0; i < 14; i++) {

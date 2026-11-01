@@ -59,6 +59,12 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
     window.__pendingSaveData = savedSram || null;
 
     if (!isEmulatorInitialized) {
+        // Указываем Emscripten точный путь к папке с desmond.wasm
+        window.Module = window.Module || {};
+        window.Module.locateFile = function(path) {
+            return 'core/' + path;
+        };
+
         await new Promise((resolve, reject) => {
             const script = document.createElement('script');
             script.src = 'core/desmond.js';
