@@ -115,44 +115,41 @@ function fixDesmondLayout(player) {
 }
 
 /* ==========================================
-   Управление: Прямая передача нажатий в ядро
+   Управление: Прямая запись в глобальный объект window.__ndsKeys
    ========================================== */
+
+window.__ndsKeys = window.__ndsKeys || {};
 
 document.querySelectorAll('button[data-key]').forEach(btn => {
     const key = btn.getAttribute('data-key');
 
-    const pressButton = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (e.pointerId !== undefined && btn.setPointerCapture) {
-            try { btn.setPointerCapture(e.pointerId); } catch (_) {}
-        }
+    const press = (e) => {
+        if (e.cancelable) e.preventDefault();
         btn.classList.add('active');
+        window.__ndsKeys[key] = true;
         if (window.__desmondSetButton) {
             window.__desmondSetButton(key, true);
         }
     };
 
-    const releaseButton = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
+    const release = (e) => {
+        if (e.cancelable) e.preventDefault();
         btn.classList.remove('active');
+        window.__ndsKeys[key] = false;
         if (window.__desmondSetButton) {
             window.__desmondSetButton(key, false);
         }
     };
 
-    if (window.PointerEvent) {
-        btn.addEventListener('pointerdown', pressButton, { passive: false });
-        btn.addEventListener('pointerup', releaseButton, { passive: false });
-        btn.addEventListener('pointercancel', releaseButton, { passive: false });
-    } else {
-        btn.addEventListener('touchstart', pressButton, { passive: false });
-        btn.addEventListener('touchend', releaseButton, { passive: false });
-        btn.addEventListener('touchcancel', releaseButton, { passive: false });
-        btn.addEventListener('mousedown', pressButton);
-        btn.addEventListener('mouseup', releaseButton);
-    }
+    // Touch-события для смартфона / планшета (мультитач работает независимо для каждой кнопки)
+    btn.addEventListener('touchstart', press, { passive: false });
+    btn.addEventListener('touchend', release, { passive: false });
+    btn.addEventListener('touchcancel', release, { passive: false });
+
+    // Mouse-события для тестирования мышкой на ПК
+    btn.addEventListener('mousedown', press);
+    btn.addEventListener('mouseup', release);
+    btn.addEventListener('mouseleave', release);
 });
 
 /* ==========================================

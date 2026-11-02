@@ -3049,16 +3049,18 @@ console.log("loaded");
         }
 
         function emuRunFrame() {
-            processGamepadInput()
+            processGamepadInput();
             var keyMask = 0;
+            var extKeys = window.__ndsKeys || {};
             for (var i = 0; i < 14; i++) {
-                if (emuKeyState[i] || uiButtonState[i]) {
-                    keyMask |= 1 << i
+                var kName = emuKeyNames[i];
+                if (emuKeyState[i] || extKeys[kName]) {
+                    keyMask |= 1 << i;
                 }
             }
-            var mic = emuKeyState[11]
+            var mic = emuKeyState[11] || extKeys['r'];
             if (mic) {
-                keyMask |= 1 << 14
+                keyMask |= 1 << 14;
             }
 
             // Берем координаты тачскрина либо из внутреннего обработчика, либо из window
@@ -3315,29 +3317,33 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
 
         // Перехватываем события на уровне window (capture: true), чтобы никакой z-index или Shadow DOM не мешал
         window.addEventListener('pointerdown', function(e) {
-            if (checkAndUpdateStylus(e.clientX, e.clientY, true, e.target)) {
-                e.preventDefault();
+            // Если кликнули по кнопке управления или топ-бару — вообще не вмешиваемся
+            if (e.target && e.target.closest && (e.target.closest('button') || e.target.closest('.top-bar'))) {
+                return;
             }
-        }, { capture: true, passive: false });
+            if (checkAndUpdateStylus(e.clientX, e.clientY, true, e.target)) {
+                if (e.cancelable) e.preventDefault();
+            }
+        }, { passive: false });
 
         window.addEventListener('pointermove', function(e) {
             if (!touched && !window.__ndsTouched) return;
             if (checkAndUpdateStylus(e.clientX, e.clientY, true, null)) {
-                e.preventDefault();
+                if (e.cancelable) e.preventDefault();
             }
-        }, { capture: true, passive: false });
+        }, { passive: false });
 
         window.addEventListener('pointerup', function(e) {
             if (touched || window.__ndsTouched) {
                 checkAndUpdateStylus(0, 0, false, null);
             }
-        }, { capture: true, passive: false });
+        });
 
         window.addEventListener('pointercancel', function(e) {
             if (touched || window.__ndsTouched) {
                 checkAndUpdateStylus(0, 0, false, null);
             }
-        }, { capture: true, passive: false });
+        });
 
         // Дублирующий fallback специально для мобильных браузеров (touchstart/touchmove/touchend)
         window.addEventListener('touchstart', function(e) {
@@ -3384,15 +3390,17 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
 
         window.onkeydown = window.onkeyup = (e) => {
             if (!emuIsRunning) {
-                return
+                return;
             }
-            var isDown = (e.type === "keydown")
-            var k = convertKeyCode(e.keyCode)
+            var isDown = (e.type === "keydown");
+            var k = convertKeyCode(e.keyCode);
             if (k >= 0) {
-                e.preventDefault()
-                emuKeyState[k] = isDown
+                e.preventDefault();
+                emuKeyState[k] = isDown;
+                window.__ndsKeys = window.__ndsKeys || {};
+                window.__ndsKeys[emuKeyNames[k]] = isDown;
             }
-        }
+        };
 
         var currentConnectedGamepad = -1
         var gamePadKeyMap = {
