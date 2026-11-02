@@ -3279,18 +3279,11 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
         }
         emuLoop()
 
-       function checkAndUpdateStylus(clientX, clientY, isDown, targetEl) {
-        if (targetEl && targetEl.closest && targetEl.closest('button')) {
-                return false;
-            }    
-        tryInitSound();
+       function checkAndUpdateStylus(clientX, clientY, isDown) {
+            tryInitSound();
             if (!isDown) {
                 touched = 0;
                 window.__ndsTouched = 0;
-                return false;
-            }
-            // Если пользователь нажал на физическую кнопку интерфейса (A, B, Start и т.д.) — не трогаем тачскрин
-            if (targetEl && targetEl.closest && targetEl.closest('button')) {
                 return false;
             }
             var bottomCanvas = screenCanvas[1];
@@ -3298,7 +3291,6 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
             var r = bottomCanvas.getBoundingClientRect();
             if (r.width === 0 || r.height === 0) return false;
 
-            // Проверяем, попала ли точка нажатия (или ведения стилуса) в область нижнего экрана
             var isInside = (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom);
             if (!isInside && !touched) {
                 return false;
@@ -3315,35 +3307,63 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
             return true;
         }
 
-        // Перехватываем события на уровне window (capture: true), чтобы никакой z-index или Shadow DOM не мешал
+        // Отслеживаем активные нажатия по pointerId, чтобы работал мультитач (например, бег B + крестовина)
+        var activePointers = {};
+
         window.addEventListener('pointerdown', function(e) {
-            // Если кликнули по кнопке управления или топ-бару — вообще не вмешиваемся
-            if (e.target && e.target.closest && (e.target.closest('button') || e.target.closest('.top-bar'))) {
+            tryInitSound();
+            var btn = e.target && e.target.closest ? e.target.closest('button[data-key]') : null;
+            if (btn) {
+                e.preventDefault();
+                e.stopPropagation();
+                var key = btn.getAttribute('data-key');
+                var idx = keyNameToKeyId[key];
+                if (idx !== undefined && idx >= 0) {
+                    activePointers[e.pointerId] = { key: key, idx: idx, btn: btn };
+                    btn.classList.add('active');
+                    emuKeyState[idx] = true;
+                    window.__ndsKeys = window.__ndsKeys || {};
+                    window.__ndsKeys[key] = true;
+                }
                 return;
             }
-            if (checkAndUpdateStylus(e.clientX, e.clientY, true, e.target)) {
-                if (e.cancelable) e.preventDefault();
+            // Если это кнопки верхней панели (Загрузить ROM и т.д.) — пропускаем штатный клик
+            if (e.target && e.target.closest && e.target.closest('.top-bar')) {
+                return;
             }
-        }, { passive: false });
+            // Иначе проверяем нажатие на нижний сенсорный экран
+            if (checkAndUpdateStylus(e.clientX, e.clientY, true)) {
+                e.preventDefault();
+                activePointers[e.pointerId] = { stylus: true };
+            }
+        }, { capture: true, passive: false });
 
         window.addEventListener('pointermove', function(e) {
-            if (!touched && !window.__ndsTouched) return;
-            if (checkAndUpdateStylus(e.clientX, e.clientY, true, null)) {
-                if (e.cancelable) e.preventDefault();
+            var ptr = activePointers[e.pointerId];
+            if (ptr && ptr.stylus) {
+                e.preventDefault();
+                checkAndUpdateStylus(e.clientX, e.clientY, true);
             }
-        }, { passive: false });
+        }, { capture: true, passive: false });
 
-        window.addEventListener('pointerup', function(e) {
-            if (touched || window.__ndsTouched) {
-                checkAndUpdateStylus(0, 0, false, null);
-            }
-        });
+        function handlePointerRelease(e) {
+            var ptr = activePointers[e.pointerId];
+            if (!ptr) return;
+            delete activePointers[e.pointerId];
 
-        window.addEventListener('pointercancel', function(e) {
-            if (touched || window.__ndsTouched) {
-                checkAndUpdateStylus(0, 0, false, null);
+            if (ptr.stylus) {
+                checkAndUpdateStylus(0, 0, false);
+            } else if (ptr.key !== undefined) {
+                ptr.btn.classList.remove('active');
+                emuKeyState[ptr.idx] = false;
+                if (window.__ndsKeys) {
+                    window.__ndsKeys[ptr.key] = false;
+                }
             }
-        });
+        }
+
+        window.addEventListener('pointerup', handlePointerRelease, { capture: true, passive: false });
+        window.addEventListener('pointercancel', handlePointerRelease, { capture: true, passive: false });
 
         // Дублирующий fallback специально для мобильных браузеров (touchstart/touchmove/touchend)
         window.addEventListener('touchstart', function(e) {
