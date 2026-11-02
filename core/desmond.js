@@ -2806,8 +2806,8 @@ module.exports = localforage_js;
           flex-direction: column !important;
           align-items: center !important;
           justify-content: center !important;
-          width: 312px !important;
-          height: 468px !important;
+          width: 358px !important;
+          height: 538px !important;
           user-select: none;
           -webkit-user-select: none;
           touch-action: none;
@@ -2817,13 +2817,13 @@ module.exports = localforage_js;
           flex-direction: column;
           align-items: center;
           justify-content: center;
-          width: 312px;
-          height: 468px;
+          width: 358px;
+          height: 538px;
           touch-action: none;
         }
         canvas {
-          width: 312px !important;
-          height: 234px !important;
+          width: 358px !important;
+          height: 269px !important;
           display: block !important;
           image-rendering: pixelated;
           image-rendering: crisp-edges;
@@ -2994,7 +2994,8 @@ console.log("loaded");
             }
         }
 
-        var emuKeyState = new Array(14)
+        var emuKeyState = new Array(14).fill(false);
+        var uiButtonState = new Array(14).fill(false);
         const emuKeyNames = ["right", "left", "down", "up", "select", "start", "b", "a", "y", "x", "l", "r", "debug", "lid"]
         var vkMap = {}
         var vkState = {}
@@ -3051,7 +3052,7 @@ console.log("loaded");
             processGamepadInput()
             var keyMask = 0;
             for (var i = 0; i < 14; i++) {
-                if (emuKeyState[i]) {
+                if (emuKeyState[i] || uiButtonState[i]) {
                     keyMask |= 1 << i
                 }
             }
@@ -3277,7 +3278,10 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
         emuLoop()
 
        function checkAndUpdateStylus(clientX, clientY, isDown, targetEl) {
-            tryInitSound();
+        if (targetEl && targetEl.closest && targetEl.closest('button')) {
+                return false;
+            }    
+        tryInitSound();
             if (!isDown) {
                 touched = 0;
                 window.__ndsTouched = 0;
@@ -3373,6 +3377,7 @@ registerProcessor('my-worklet', MyAudioWorklet)`], {type: "text/javascript"}))).
             tryInitSound();
             var idx = keyNameToKeyId[keyName];
             if (idx !== undefined && idx >= 0) {
+                uiButtonState[idx] = !!isDown;
                 emuKeyState[idx] = !!isDown;
             }
         };

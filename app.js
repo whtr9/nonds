@@ -98,7 +98,7 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
     }
 
 
-// Стилизация обоих экранов внутри Shadow DOM
+// Стилизация обоих экранов внутри Shadow DOM (+15% к размеру)
 function fixDesmondLayout(player) {
     if (!player || !player.shadowRoot) return;
     const canvases = player.shadowRoot.querySelectorAll('canvas');
@@ -106,8 +106,8 @@ function fixDesmondLayout(player) {
         canvas.style.position = 'relative';
         canvas.style.top = 'auto';
         canvas.style.left = 'auto';
-        canvas.style.width = '312px';
-        canvas.style.height = '234px';
+        canvas.style.width = '358px';
+        canvas.style.height = '269px';
         canvas.style.display = 'block';
         canvas.style.pointerEvents = 'auto';
         canvas.style.touchAction = 'none';
@@ -115,32 +115,44 @@ function fixDesmondLayout(player) {
 }
 
 /* ==========================================
-   Управление: Прямая передача нажатий в emuKeyState ядра
+   Управление: Прямая передача нажатий в ядро
    ========================================== */
 
 document.querySelectorAll('button[data-key]').forEach(btn => {
     const key = btn.getAttribute('data-key');
 
-    btn.addEventListener('pointerdown', (e) => {
+    const pressButton = (e) => {
         e.preventDefault();
-        btn.blur();
+        e.stopPropagation();
+        if (e.pointerId !== undefined && btn.setPointerCapture) {
+            try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+        }
         btn.classList.add('active');
         if (window.__desmondSetButton) {
             window.__desmondSetButton(key, true);
         }
-    });
+    };
 
     const releaseButton = (e) => {
         e.preventDefault();
+        e.stopPropagation();
         btn.classList.remove('active');
         if (window.__desmondSetButton) {
             window.__desmondSetButton(key, false);
         }
     };
 
-    btn.addEventListener('pointerup', releaseButton);
-    btn.addEventListener('pointercancel', releaseButton);
-    btn.addEventListener('pointerleave', releaseButton);
+    if (window.PointerEvent) {
+        btn.addEventListener('pointerdown', pressButton, { passive: false });
+        btn.addEventListener('pointerup', releaseButton, { passive: false });
+        btn.addEventListener('pointercancel', releaseButton, { passive: false });
+    } else {
+        btn.addEventListener('touchstart', pressButton, { passive: false });
+        btn.addEventListener('touchend', releaseButton, { passive: false });
+        btn.addEventListener('touchcancel', releaseButton, { passive: false });
+        btn.addEventListener('mousedown', pressButton);
+        btn.addEventListener('mouseup', releaseButton);
+    }
 });
 
 /* ==========================================

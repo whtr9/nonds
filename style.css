@@ -56,7 +56,7 @@ body, button {
     padding: 6px 4px 12px;
 }
 
-/* Увеличенный контейнер экранов (масштаб ~1.22x от 256x384) */
+/* Увеличенный на 15% контейнер экранов (358x538 вместо 312x468) */
 .display-area {
     position: relative;
     display: flex;
@@ -65,8 +65,8 @@ body, button {
     justify-content: center;
     z-index: 10;
     margin-top: 4px;
-    width: 312px;
-    height: 468px;
+    width: 358px;
+    height: 538px;
     flex-shrink: 0;
 }
 
@@ -79,14 +79,14 @@ desmond-player, #player {
     flex-direction: column !important;
     align-items: center !important;
     justify-content: center !important;
-    width: 312px !important;
-    height: 468px !important;
+    width: 358px !important;
+    height: 538px !important;
     pointer-events: auto !important;
 }
 
 desmond-player canvas, canvas {
-    width: 312px !important;
-    height: 234px !important;
+    width: 358px !important;
+    height: 269px !important;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     touch-action: none;
