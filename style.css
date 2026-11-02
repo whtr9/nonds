@@ -150,7 +150,7 @@ desmond-player canvas, canvas {
 
 .d-pad-middle, .action-middle {
     display: flex;
-    gap: 24px;
+    gap: 36px; /*x1.5 */
     margin: 2px 0;
 }
 
