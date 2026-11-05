@@ -3102,33 +3102,171 @@ console.log("loaded");
             }
         }
 
+        var currentRomBufPtr = 0;
+
         // Экспортируем функцию принудительного чтения/записи .sav из памяти ядра наружу для app.js
-        window.__desmondExtractSave = function() {
-            if (!emuIsGameLoaded || !Module._savGetSize) return null;
-            var size = Module._savGetSize();
-            if (size > 0) {
-                var ptr = Module._savGetPointer(0);
-                var buf = new Uint8Array(size);
-                buf.set(Module.HEAPU8.subarray(ptr, ptr + size));
-                if (typeof gameID !== 'undefined' && gameID) {
-                    localforage.setItem('sav-' + gameID, buf);
+        window.__desmondExtractSave = async function() {
+            if (!emuIsGameLoaded) return null;
+            if (Module._savGetSize) {
+                var size = Module._savGetSize();
+                if (size > 0) {
+                    var ptr = Module._savGetPointer(0);
+                    var buf = new Uint8Array(size);
+                    buf.set(Module.HEAPU8.subarray(ptr, ptr + size));
+                    if (typeof gameID !== 'undefined' && gameID) {
+                        await localforage.setItem('sav-' + gameID, buf);
+                    }
+                    return buf;
                 }
-                return buf;
+            }
+            // Fallback: если _savGetSize() вернул 0, проверяем внутренний localforage ядра
+            if (typeof gameID !== 'undefined' && gameID) {
+                var cached = await localforage.getItem('sav-' + gameID);
+                if (cached) {
+                    return cached instanceof Uint8Array ? cached : new Uint8Array(cached);
+                }
             }
             return null;
         };
 
-        window.__desmondInjectSave = function(u8Array) {
+        window.__desmondInjectSave = async function(u8Array) {
             if (!u8Array || !u8Array.byteLength) return;
+            var copy = new Uint8Array(u8Array);
             if (typeof gameID !== 'undefined' && gameID) {
-                localforage.setItem('sav-' + gameID, u8Array);
+                await localforage.setItem('sav-' + gameID, copy);
             }
             if (emuIsGameLoaded && Module._savGetPointer) {
-                var ptr = Module._savGetPointer(u8Array.byteLength);
+                var ptr = Module._savGetPointer(copy.byteLength);
                 if (ptr) {
-                    Module.HEAPU8.set(u8Array, ptr);
+                    Module.HEAPU8.set(copy, ptr);
                     Module._savUpdateChangeFlag();
                 }
+            }
+        };
+
+        // Создание полного слепка состояния эмулятора (Save State в ту же секунду)
+        window.__desmondCaptureState = function() {
+            if (!emuIsGameLoaded || !Module.HEAPU8) return null;
+            var wasRunning = emuIsRunning;
+            emuIsRunning = false; // Ставим кадр на паузу на время снятия дампа
+
+            try {
+                var heapU8 = Module.HEAPU8;
+                var heapU32 = Module.HEAPU32;
+                var totalLen = heapU8.byteLength;
+                var CHUNK_SIZE = 65536; // 64 KB
+                var numChunks = Math.ceil(totalLen / CHUNK_SIZE);
+
+                // Диапазон памяти, где лежит сам ROM (пропускаем его, т.к. ROM грузится отдельно)
+                var romStartChunk = currentRomBufPtr > 0 ? Math.floor(currentRomBufPtr / CHUNK_SIZE) : -1;
+                var romEndChunk = (currentRomBufPtr > 0 && romSize > 0)
+                    ? Math.floor((currentRomBufPtr + romSize) / CHUNK_SIZE)
+                    : -1;
+
+                var activeChunks = [];
+                for (var c = 0; c < numChunks; c++) {
+                    if (c > romStartChunk && c < romEndChunk) continue;
+
+                    var byteOffset = c * CHUNK_SIZE;
+                    var u32Start = byteOffset >>> 2;
+                    var u32End = Math.min(heapU32.length, (byteOffset + CHUNK_SIZE) >>> 2);
+
+                    var hasNonZero = false;
+                    for (var i = u32Start; i < u32End; i++) {
+                        if (heapU32[i] !== 0) {
+                            hasNonZero = true;
+                            break;
+                        }
+                    }
+                    if (hasNonZero) {
+                        activeChunks.push(c);
+                    }
+                }
+
+                // Формат бинарного слепка:
+                // [0..3]: магическое число 0x44535354 ("DSST")
+                // [4..7]: количество активных чанков (N)
+                // [8..8+N*4-1]: индексы ненулевых чанков (Uint32)
+                // [8+N*4...]: данные самих чанков по 65536 байт
+                var headerSize = 8 + activeChunks.length * 4;
+                var outBuf = new Uint8Array(headerSize + activeChunks.length * CHUNK_SIZE);
+                var outView = new DataView(outBuf.buffer);
+
+                outView.setUint32(0, 0x44535354, true);
+                outView.setUint32(4, activeChunks.length, true);
+
+                for (var idx = 0; idx < activeChunks.length; idx++) {
+                    outView.setUint32(8 + idx * 4, activeChunks[idx], true);
+                }
+
+                var dataOffset = headerSize;
+                for (var idx = 0; idx < activeChunks.length; idx++) {
+                    var chunkByteStart = activeChunks[idx] * CHUNK_SIZE;
+                    var slice = heapU8.subarray(chunkByteStart, Math.min(totalLen, chunkByteStart + CHUNK_SIZE));
+                    outBuf.set(slice, dataOffset);
+                    dataOffset += CHUNK_SIZE;
+                }
+
+                return outBuf;
+            } finally {
+                emuIsRunning = wasRunning;
+            }
+        };
+
+        // Восстановление слепка состояния эмулятора в ту же секунду
+        window.__desmondRestoreState = function(stateBuf) {
+            if (!emuIsGameLoaded || !Module.HEAPU8 || !stateBuf || stateBuf.byteLength < 8) return false;
+            var view = new DataView(stateBuf.buffer, stateBuf.byteOffset, stateBuf.byteLength);
+            if (view.getUint32(0, true) !== 0x44535354) {
+                console.error('Неверный формат Save State');
+                return false;
+            }
+
+            var wasRunning = emuIsRunning;
+            emuIsRunning = false;
+
+            try {
+                var heapU8 = Module.HEAPU8;
+                var totalLen = heapU8.byteLength;
+                var CHUNK_SIZE = 65536;
+                var numChunks = Math.ceil(totalLen / CHUNK_SIZE);
+
+                var romStartChunk = currentRomBufPtr > 0 ? Math.floor(currentRomBufPtr / CHUNK_SIZE) : -1;
+                var romEndChunk = (currentRomBufPtr > 0 && romSize > 0)
+                    ? Math.floor((currentRomBufPtr + romSize) / CHUNK_SIZE)
+                    : -1;
+
+                // 1. Очищаем всю память кроме области ROM
+                for (var c = 0; c < numChunks; c++) {
+                    if (c > romStartChunk && c < romEndChunk) continue;
+                    var start = c * CHUNK_SIZE;
+                    var end = Math.min(totalLen, start + CHUNK_SIZE);
+                    heapU8.fill(0, start, end);
+                }
+
+                // 2. Записываем сохранённые чанки на свои места
+                var activeCount = view.getUint32(4, true);
+                var dataOffset = 8 + activeCount * 4;
+
+                for (var idx = 0; idx < activeCount; idx++) {
+                    var chunkIndex = view.getUint32(8 + idx * 4, true);
+                    var destStart = chunkIndex * CHUNK_SIZE;
+                    var copyLen = Math.min(CHUNK_SIZE, totalLen - destStart);
+                    heapU8.set(stateBuf.subarray(dataOffset, dataOffset + copyLen), destStart);
+                    dataOffset += CHUNK_SIZE;
+                }
+
+                // 3. Перепривязываем экранные буферы и звук, и сразу отрисовываем сохранённый кадр
+                var fb = Module._getSymbol(4);
+                for (var i = 0; i < 2; i++) {
+                    FB[i] = new ImageData(new Uint8ClampedArray(Module.HEAPU8.buffer).subarray(fb + 256 * 192 * 4 * i, fb + 256 * 192 * 4 * (i + 1)), 256, 192);
+                }
+                ctx2d[0].putImageData(FB[0], 0, 0);
+                ctx2d[1].putImageData(FB[1], 0, 0);
+
+                return true;
+            } finally {
+                emuIsRunning = wasRunning;
             }
         };
 
@@ -3168,11 +3306,13 @@ console.log("loaded");
             console.log('gameID', gameID)
             romSize = file.size
             var romBufPtr = Module._prepareRomBuffer(romSize)
+            currentRomBufPtr = romBufPtr;
             console.log(romSize, romBufPtr)
             Module.HEAPU8.set(new Uint8Array(await file.arrayBuffer()), romBufPtr);
             var saveData = window.__pendingSaveData || await localforage.getItem('sav-' + gameID)
             if (saveData) {
                 var u8Save = saveData instanceof Uint8Array ? saveData : new Uint8Array(saveData);
+                await localforage.setItem('sav-' + gameID, u8Save);
                 Module.HEAPU8.set(u8Save, Module._savGetPointer(u8Save.byteLength))
             }
             Module._savUpdateChangeFlag()
@@ -3193,6 +3333,15 @@ console.log("loaded");
             emuIsGameLoaded = true
             emuIsRunning = true
             shadow.querySelector("#player").hidden = false;
+
+            // Если есть отложенный быстрый слепок (Save State) — накатываем его сразу после старта ROM!
+            if (window.__pendingQuickState) {
+                var stateToRestore = window.__pendingQuickState;
+                window.__pendingQuickState = null;
+                window.__desmondRestoreState(stateToRestore);
+                console.log('Точный момент игры (Save State) успешно восстановлен!');
+            }
+
             callPlugin('loaded', gameID)
         }
 

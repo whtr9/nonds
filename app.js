@@ -1,4 +1,14 @@
-import { saveRomToCache, getCachedRom, loadSram, saveSram, exportSaveFile, importSaveFile } from './storage.js';
+import {
+    saveRomToCache,
+    getCachedRom,
+    loadSram,
+    saveSram,
+    saveQuickState,
+    loadQuickState,
+    deleteQuickState,
+    exportSaveFile,
+    importSaveFile
+} from './storage.js';
 
 let currentRomName = '';
 let isEmulatorInitialized = false;
@@ -10,15 +20,15 @@ if ('serviceWorker' in navigator) {
     });
 }
 
-// Автоматический перехват сохранений из ядра Desmond в вашу БД (storage.js)
+// Автоматический перехват внутриигровых сохранений (.sav) из ядра Desmond в БД
 window.__onDesmondAutoSave = async (uint8Array) => {
     if (currentRomName && uint8Array && uint8Array.byteLength > 0) {
         await saveSram(currentRomName, uint8Array);
-        console.log('Автосохранение записано в IndexedDB:', currentRomName);
+        console.log('Внутриигровое автосохранение (.sav) записано в IndexedDB:', currentRomName);
     }
 };
 
-// 2. Кнопка «Продолжить» при запуске
+// 2. Кнопка «Продолжить» при запуске (загружает ROM + точный кадр Save State)
 document.addEventListener('DOMContentLoaded', async () => {
     try {
         const cachedRom = await getCachedRom();
@@ -26,7 +36,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const btnContinue = document.getElementById('btn-continue');
             btnContinue.disabled = false;
             btnContinue.addEventListener('click', () => {
-                loadEmulatorAndRun(cachedRom.name, cachedRom.data);
+                loadEmulatorAndRun(cachedRom.name, cachedRom.data, true);
             });
         }
     } catch (error) {
@@ -43,7 +53,8 @@ document.getElementById('rom-input').addEventListener('change', async (event) =>
         const arrayBuffer = await file.arrayBuffer();
         await saveRomToCache(file.name, arrayBuffer);
         document.getElementById('btn-continue').disabled = false;
-        loadEmulatorAndRun(file.name, arrayBuffer);
+        // При ручном выборе ROM также проверяем, есть ли для него быстрое сохранение
+        loadEmulatorAndRun(file.name, arrayBuffer, true);
         event.target.value = '';
     } catch (error) {
         console.error('Ошибка чтения ROM файла:', error);
@@ -51,12 +62,17 @@ document.getElementById('rom-input').addEventListener('change', async (event) =>
 });
 
 // 4. Инициализация desmond.js и запуск игры
-async function loadEmulatorAndRun(romName, arrayBuffer) {
+async function loadEmulatorAndRun(romName, arrayBuffer, restoreQuickState = true) {
     currentRomName = romName;
 
-    // Подгружаем сохранение из нашей БД заранее, чтобы tryLoadROM сразу подхватил его
-    const savedSram = await loadSram(romName);
+    // Подгружаем внутриигровое сохранение (.sav) и точный слепок состояния (Save State)
+    const [savedSram, savedQuickState] = await Promise.all([
+        loadSram(romName),
+        restoreQuickState ? loadQuickState(romName) : Promise.resolve(null)
+    ]);
+
     window.__pendingSaveData = savedSram || null;
+    window.__pendingQuickState = savedQuickState || null;
 
     if (!isEmulatorInitialized) {
         await new Promise((resolve, reject) => {
@@ -68,17 +84,6 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
         });
         isEmulatorInitialized = true;
     }
-
-    const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
-    const romUrl = URL.createObjectURL(blob);
-    const player = document.getElementById('player');
-
-    if (player && typeof player.loadURL === 'function') {
-        player.loadURL(romUrl, () => {
-            fixDesmondLayout(player);
-        });
-    }
-}
 
     const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
     const romUrl = URL.createObjectURL(blob);
@@ -96,7 +101,7 @@ async function loadEmulatorAndRun(romName, arrayBuffer) {
     } else {
         setTimeout(startPlayer, 350);
     }
-
+}
 
 // Стилизация обоих экранов внутри Shadow DOM (+15% к размеру)
 function fixDesmondLayout(player) {
@@ -141,19 +146,17 @@ document.querySelectorAll('button[data-key]').forEach(btn => {
         }
     };
 
-    // Touch-события для смартфона / планшета (мультитач работает независимо для каждой кнопки)
     btn.addEventListener('touchstart', press, { passive: false });
     btn.addEventListener('touchend', release, { passive: false });
     btn.addEventListener('touchcancel', release, { passive: false });
 
-    // Mouse-события для тестирования мышкой на ПК
     btn.addEventListener('mousedown', press);
     btn.addEventListener('mouseup', release);
     btn.addEventListener('mouseleave', release);
 });
 
 /* ==========================================
-   Сохранения (.sav): Кнопка Сохранить, Экспорт и Импорт
+   Сохранения: Быстрое сохранение момента (Save State) + Экспорт/Импорт .sav
    ========================================== */
 
 const btnQuickSave = document.getElementById('btn-quick-save');
@@ -161,12 +164,32 @@ if (btnQuickSave) {
     btnQuickSave.addEventListener('click', async () => {
         if (!currentRomName) return alert('Сначала запустите игру!');
 
-        const liveSav = window.__desmondExtractSave ? window.__desmondExtractSave() : null;
-        if (liveSav && liveSav.byteLength > 0) {
-            await saveSram(currentRomName, liveSav);
-            alert('Сохранение успешно записано в память браузера!');
-        } else {
-            alert('Сначала сохранитесь внутри самой игры (через игровое меню Save), а затем нажмите эту кнопку!');
+        const originalText = btnQuickSave.textContent;
+        btnQuickSave.textContent = '⏳...';
+        btnQuickSave.disabled = true;
+
+        try {
+            // 1. Сохраняем точный момент игры (Save State)
+            const stateSnapshot = window.__desmondCaptureState ? window.__desmondCaptureState() : null;
+            if (!stateSnapshot) {
+                alert('Игра ещё не загружена!');
+                return;
+            }
+            await saveQuickState(currentRomName, stateSnapshot);
+
+            // 2. Параллельно сохраняем .sav (SRAM), если в игре были сохранения
+            const liveSav = window.__desmondExtractSave ? await window.__desmondExtractSave() : null;
+            if (liveSav && liveSav.byteLength > 0) {
+                await saveSram(currentRomName, liveSav);
+            }
+
+            alert('Точный момент игры сохранён! При нажатии «Продолжить» вы вернётесь в эту же секунду.');
+        } catch (err) {
+            console.error('Ошибка быстрого сохранения:', err);
+            alert('Ошибка при сохранении состояния.');
+        } finally {
+            btnQuickSave.textContent = originalText;
+            btnQuickSave.disabled = false;
         }
     });
 }
@@ -175,7 +198,7 @@ if (btnQuickSave) {
 document.getElementById('btn-export-sav').addEventListener('click', async () => {
     if (!currentRomName) return alert('Сначала запустите игру!');
 
-    const liveSav = window.__desmondExtractSave ? window.__desmondExtractSave() : null;
+    const liveSav = window.__desmondExtractSave ? await window.__desmondExtractSave() : null;
     if (liveSav && liveSav.byteLength > 0) {
         await saveSram(currentRomName, liveSav);
     }
@@ -200,12 +223,14 @@ document.getElementById('sav-input').addEventListener('change', async (event) =>
 
     try {
         const sramData = await importSaveFile(currentRomName, file);
+        // Удаляем старый Save State, чтобы при перезапуске загрузился именно импортированный .sav, а не старый слепок ОЗУ
+        await deleteQuickState(currentRomName);
         window.__pendingSaveData = sramData;
         if (window.__desmondInjectSave) {
-            window.__desmondInjectSave(sramData);
+            await window.__desmondInjectSave(sramData);
         }
         event.target.value = '';
-        alert('Сохранение импортировано! Сейчас страница перезагрузится — нажмите «Продолжить», чтобы загрузить мир.');
+        alert('Файл .sav импортирован! Сейчас страница перезагрузится — нажмите «Продолжить», чтобы загрузить сохранение.');
         window.location.reload();
     } catch (err) {
         console.error('Ошибка импорта:', err);
