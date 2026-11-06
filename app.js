@@ -20,6 +20,46 @@ if ('serviceWorker' in navigator) {
     });
 }
 
+// 2. Управление звуком (Mute / Unmute)
+window.__ndsMuted = localStorage.getItem('nds_muted') === 'true';
+const btnMute = document.getElementById('btn-mute');
+
+function updateMuteUI() {
+    if (!btnMute) return;
+    btnMute.textContent = window.__ndsMuted ? '🔇' : '🔊';
+    btnMute.classList.toggle('muted', window.__ndsMuted);
+    if (window.__desmondSetMute) {
+        window.__desmondSetMute(window.__ndsMuted);
+    }
+}
+updateMuteUI();
+
+if (btnMute) {
+    btnMute.addEventListener('click', () => {
+        window.__ndsMuted = !window.__ndsMuted;
+        localStorage.setItem('nds_muted', window.__ndsMuted);
+        updateMuteUI();
+    });
+}
+
+// 3. Выдвигающееся меню для Экспорта и Импорта .sav
+const btnMenuToggle = document.getElementById('btn-menu-toggle');
+const savDrawer = document.getElementById('sav-drawer');
+
+if (btnMenuToggle && savDrawer) {
+    btnMenuToggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        savDrawer.classList.toggle('open');
+    });
+
+    // Закрытие меню при клике вне его области
+    document.addEventListener('pointerdown', (e) => {
+        if (savDrawer.classList.contains('open') && !e.target.closest('.menu-container')) {
+            savDrawer.classList.remove('open');
+        }
+    });
+}
+
 // Автоматический перехват внутриигровых сохранений (.sav) из ядра Desmond в БД
 window.__onDesmondAutoSave = async (uint8Array) => {
     if (currentRomName && uint8Array && uint8Array.byteLength > 0) {
@@ -28,7 +68,7 @@ window.__onDesmondAutoSave = async (uint8Array) => {
     }
 };
 
-// 2. Кнопка «Продолжить» при запуске (загружает ROM + точный кадр Save State)
+// 4. Кнопка «Продолжить» при запуске (загружает ROM + точный кадр Save State)
 document.addEventListener('DOMContentLoaded', async () => {
     try {
         const cachedRom = await getCachedRom();
@@ -44,7 +84,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 });
 
-// 3. Загрузка нового ROM
+// 5. Загрузка нового ROM
 document.getElementById('rom-input').addEventListener('change', async (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -53,7 +93,6 @@ document.getElementById('rom-input').addEventListener('change', async (event) =>
         const arrayBuffer = await file.arrayBuffer();
         await saveRomToCache(file.name, arrayBuffer);
         document.getElementById('btn-continue').disabled = false;
-        // При ручном выборе ROM также проверяем, есть ли для него быстрое сохранение
         loadEmulatorAndRun(file.name, arrayBuffer, true);
         event.target.value = '';
     } catch (error) {
@@ -61,11 +100,10 @@ document.getElementById('rom-input').addEventListener('change', async (event) =>
     }
 });
 
-// 4. Инициализация desmond.js и запуск игры
+// 6. Инициализация desmond.js и запуск игры
 async function loadEmulatorAndRun(romName, arrayBuffer, restoreQuickState = true) {
     currentRomName = romName;
 
-    // Подгружаем внутриигровое сохранение (.sav) и точный слепок состояния (Save State)
     const [savedSram, savedQuickState] = await Promise.all([
         loadSram(romName),
         restoreQuickState ? loadQuickState(romName) : Promise.resolve(null)
@@ -84,6 +122,8 @@ async function loadEmulatorAndRun(romName, arrayBuffer, restoreQuickState = true
         });
         isEmulatorInitialized = true;
     }
+
+    updateMuteUI();
 
     const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
     const romUrl = URL.createObjectURL(blob);
@@ -169,7 +209,6 @@ if (btnQuickSave) {
         btnQuickSave.disabled = true;
 
         try {
-            // 1. Сохраняем точный момент игры (Save State)
             const stateSnapshot = window.__desmondCaptureState ? window.__desmondCaptureState() : null;
             if (!stateSnapshot) {
                 alert('Игра ещё не загружена!');
@@ -177,7 +216,6 @@ if (btnQuickSave) {
             }
             await saveQuickState(currentRomName, stateSnapshot);
 
-            // 2. Параллельно сохраняем .sav (SRAM), если в игре были сохранения
             const liveSav = window.__desmondExtractSave ? await window.__desmondExtractSave() : null;
             if (liveSav && liveSav.byteLength > 0) {
                 await saveSram(currentRomName, liveSav);
@@ -196,6 +234,7 @@ if (btnQuickSave) {
 
 // Экспорт .sav прямо во время игры
 document.getElementById('btn-export-sav').addEventListener('click', async () => {
+    if (savDrawer) savDrawer.classList.remove('open');
     if (!currentRomName) return alert('Сначала запустите игру!');
 
     const liveSav = window.__desmondExtractSave ? await window.__desmondExtractSave() : null;
@@ -207,6 +246,7 @@ document.getElementById('btn-export-sav').addEventListener('click', async () => 
 
 // Импорт .sav
 document.getElementById('sav-input').addEventListener('change', async (event) => {
+    if (savDrawer) savDrawer.classList.remove('open');
     const file = event.target.files[0];
     if (!file) return;
 
@@ -223,7 +263,6 @@ document.getElementById('sav-input').addEventListener('change', async (event) =>
 
     try {
         const sramData = await importSaveFile(currentRomName, file);
-        // Удаляем старый Save State, чтобы при перезапуске загрузился именно импортированный .sav, а не старый слепок ОЗУ
         await deleteQuickState(currentRomName);
         window.__pendingSaveData = sramData;
         if (window.__desmondInjectSave) {

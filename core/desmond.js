@@ -3078,8 +3078,10 @@ console.log("loaded");
             if (audioWorkletNode) {
                 try {
                     var samplesRead = Module._fillAudioBuffer(4096)
-                    tmpAudioBuffer.set(audioBuffer.subarray(0, samplesRead * 2))
-                    audioWorkletNode.port.postMessage(tmpAudioBuffer.subarray(0, samplesRead * 2))
+                    if (!window.__ndsMuted) {
+                        tmpAudioBuffer.set(audioBuffer.subarray(0, samplesRead * 2))
+                        audioWorkletNode.port.postMessage(tmpAudioBuffer.subarray(0, samplesRead * 2))
+                    }
                 } catch (error) {
                     console.log(error)
                 }
@@ -3345,7 +3347,19 @@ console.log("loaded");
             callPlugin('loaded', gameID)
         }
 
+        window.__desmondSetMute = function(muted) {
+            window.__ndsMuted = !!muted;
+            if (audioContext) {
+                if (window.__ndsMuted && audioContext.state === 'running') {
+                    audioContext.suspend();
+                } else if (!window.__ndsMuted && audioContext.state !== 'running') {
+                    audioContext.resume();
+                }
+            }
+        };
+
         function tryInitSound() {
+            if (window.__ndsMuted) return;
             try {
                 if (audioContext) {
                     if (audioContext.state != 'running') {

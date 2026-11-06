@@ -20,6 +20,7 @@ body, button {
     z-index: 100;
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 6px;
     padding: 8px 6px;
     background: #2b2b2b;
@@ -45,6 +46,49 @@ body, button {
 .top-bar button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+}
+
+#btn-mute.muted {
+    background: #7a2e2e;
+    border-color: #a34848;
+}
+
+/* Выдвигающееся меню для Экспорта / Импорта .sav */
+.menu-container {
+    position: relative;
+}
+
+.sav-drawer {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 150px;
+    padding: 8px;
+    background: #2b2b2b;
+    border: 1px solid #555;
+    border-radius: 8px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.7);
+    opacity: 0;
+    transform: translateY(-10px);
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    z-index: 200;
+}
+
+.sav-drawer.open {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+.sav-drawer button {
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    white-space: nowrap;
 }
 
 .emulator-layout {
@@ -116,7 +160,7 @@ desmond-player canvas, canvas {
     pointer-events: auto;
 }
 
-/* Плечевые кнопки L и R */
+/* Плечевые кнопки L и R (увеличены на 10% по диагонали внутрь экрана) */
 .shoulder-buttons {
     position: absolute;
     top: -35px;
@@ -133,14 +177,37 @@ desmond-player canvas, canvas {
     height: 34px !important;
     border-radius: 8px !important;
     font-weight: bold;
+    transform: scale(1.1);
 }
 
+.shoulder-l {
+    transform-origin: top left;
+}
+
+.shoulder-r {
+    transform-origin: top right;
+}
+
+.shoulder.active {
+    transform: scale(1.03) !important;
+}
+
+/* Блоки крестовины и кнопок действий (увеличены на 10% по диагонали к центру экрана) */
 .d-pad-container, .action-buttons-container {
     display: flex;
     flex-direction: column;
     align-items: center;
     margin-bottom: 6px;
     pointer-events: none;
+    transform: scale(1.1);
+}
+
+.d-pad-container {
+    transform-origin: bottom left;
+}
+
+.action-buttons-container {
+    transform-origin: bottom right;
 }
 
 .d-pad-container button,
@@ -150,7 +217,7 @@ desmond-player canvas, canvas {
 
 .d-pad-middle, .action-middle {
     display: flex;
-    gap: 36px; /*x1.5 */
+    gap: 36px;
     margin: 2px 0;
 }
 
@@ -175,6 +242,8 @@ button[data-key] {
     margin-bottom: 12px;
     pointer-events: none;
     flex-shrink: 0;
+    transform: scale(1.1);
+    transform-origin: bottom center;
 }
 
 .system-btn {
@@ -207,6 +276,14 @@ button.active {
         margin-top: 0;
         align-items: center;
         padding: 0 28px;
+    }
+
+    .d-pad-container {
+        transform-origin: center left;
+    }
+
+    .action-buttons-container {
+        transform-origin: center right;
     }
 
     .shoulder-buttons {
