@@ -3358,6 +3358,18 @@ console.log("loaded");
             }
         };
 
+        window.__desmondSetPause = function(paused) {
+            if (!emuIsGameLoaded) return;
+            emuIsRunning = !paused;
+            if (audioContext && !window.__ndsMuted) {
+                if (paused && audioContext.state === 'running') {
+                    audioContext.suspend();
+                } else if (!paused && audioContext.state !== 'running') {
+                    audioContext.resume();
+                }
+            }
+        };
+
         function tryInitSound() {
             if (window.__ndsMuted) return;
             try {

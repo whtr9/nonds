@@ -103,6 +103,7 @@ document.getElementById('rom-input').addEventListener('change', async (event) =>
 // 6. Инициализация desmond.js и запуск игры
 async function loadEmulatorAndRun(romName, arrayBuffer, restoreQuickState = true) {
     currentRomName = romName;
+    enableExitGuard();
 
     const [savedSram, savedQuickState] = await Promise.all([
         loadSram(romName),
@@ -273,5 +274,77 @@ document.getElementById('sav-input').addEventListener('change', async (event) =>
         window.location.reload();
     } catch (err) {
         console.error('Ошибка импорта:', err);
+    }
+
+});
+
+/* ==========================================
+   Защита от случайного выхода свайпом (Back Gesture Trap)
+   ========================================== */
+
+let isExitGuardActive = false;
+
+function enableExitGuard() {
+    if (isExitGuardActive) return;
+    isExitGuardActive = true;
+    // Создаём буферное состояние в истории, чтобы жест «Назад» не закрывал PWA
+    history.pushState({ ndsGuard: true }, '', location.href);
+}
+
+// Активируем защиту при первом же касании экрана или запуске игры
+window.addEventListener('pointerdown', enableExitGuard, { once: true });
+
+// Перехватываем жест смахивания с края экрана («Назад»)
+window.addEventListener('popstate', async (event) => {
+    if (!currentRomName) {
+        // Если игра ещё не запущена, просто возвращаем ловушку на место
+        history.pushState({ ndsGuard: true }, '', location.href);
+        return;
+    }
+
+    // Ставим эмулятор на паузу, пока игрок решает
+    if (window.__desmondSetPause) window.__desmondSetPause(true);
+
+    const wantToSaveAndExit = confirm(
+        'Вы сделали жест «Назад».\n\nНажмите «ОК», чтобы СОХРАНИТЬ этот момент и выйти.\nНажмите «Отмена», чтобы ПРОДОЛЖИТЬ игру.'
+    );
+
+    if (wantToSaveAndExit) {
+        try {
+            const stateSnapshot = window.__desmondCaptureState ? window.__desmondCaptureState() : null;
+            if (stateSnapshot) {
+                await saveQuickState(currentRomName, stateSnapshot);
+            }
+            const liveSav = window.__desmondExtractSave ? await window.__desmondExtractSave() : null;
+            if (liveSav && liveSav.byteLength > 0) {
+                await saveSram(currentRomName, liveSav);
+            }
+        } catch (err) {
+            console.error('Ошибка сохранения перед выходом:', err);
+        }
+        // Отпускаем приложение (закрываем или перезагружаем в стартовое меню)
+        history.back();
+    } else {
+        // Игрок нажал «Отмена» — восстанавливаем барьер в истории и снимаем игру с паузы
+        history.pushState({ ndsGuard: true }, '', location.href);
+        if (window.__desmondSetPause) window.__desmondSetPause(false);
+    }
+});
+
+// Дополнительная подстраховка для стандартного закрытия вкладки
+window.addEventListener('beforeunload', (e) => {
+    if (currentRomName) {
+        e.preventDefault();
+        e.returnValue = '';
+    }
+});
+
+// Автосохранение .sav при сворачивании PWA (например, свайпом домой снизу вверх)
+document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'hidden' && currentRomName) {
+        const liveSav = window.__desmondExtractSave ? await window.__desmondExtractSave() : null;
+        if (liveSav && liveSav.byteLength > 0) {
+            await saveSram(currentRomName, liveSav);
+        }
     }
 });
